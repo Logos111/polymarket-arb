@@ -15,7 +15,8 @@ dist/
 build/
 
 # Data & logs
-data/
+# 用 /data/ 锚定仓库根目录的 tick 数据目录；否则会误忽略 src/pm_arb/data/ 代码包
+/data/
 logs/
 *.log
 *.sqlite
