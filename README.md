@@ -48,6 +48,8 @@ uv run pytest                 #  测试
 ## 路线图
 
 - [x] 阶段 0：脚手架与基础设施（配置 / 日志 / 自检）
-- [ ] 阶段 1：数据层（Gamma 同步、CLOB REST、WS 订单簿、tick 录制）
-- [ ] 阶段 2：交易接口（认证、下单、链上 split/merge）+ paper trading
-- [ ] 阶段 3+：策略 A（互补套利）上线，详见项目规划
+- [x] 阶段 1：数据层（Gamma 同步、CLOB REST、WS 订单簿、tick 录制）— 实网联调通过
+- [x] 阶段 2：交易接口（L1/L2 认证、下单封装、链上 split/merge/redeem）+ paper 模拟成交
+- [ ] 阶段 2.5：配置交易钱包私钥，小额真实验证下单/merge 闭环
+- [ ] 阶段 3：策略 A（互补套利）信号检测 + paper 跑通
+- [ ] 阶段 4+：风控硬化、NegRisk、跨平台、做市，详见项目规划
