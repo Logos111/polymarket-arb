@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = False
     http_timeout: float = 10.0
+    # 本地代理（网络受限时使用，如 http://127.0.0.1:7890）；留空则直连
+    proxy_url: str = Field(default="", repr=False)
 
     # ---- 便捷判断 ----
     @property

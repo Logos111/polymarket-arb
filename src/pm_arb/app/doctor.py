@@ -28,6 +28,7 @@ def main() -> int:
         ("CLOB WS (market)", s.clob_ws_market_url, True),
         ("CLOB WS (user)", s.clob_ws_user_url, True),
         ("Polygon RPC", s.polygon_rpc_url or "(default public node)", bool(s.polygon_rpc_url)),
+        ("Proxy", s.proxy_url or "(direct)", True),
         ("Chain id", str(s.chain_id), True),
         ("Signature type", str(s.signature_type), True),
     ]
