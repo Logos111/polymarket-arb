@@ -87,12 +87,14 @@ async def _amain(markets_count: int, seconds: int, record: bool) -> int:
         stop.set()
 
     stopper = asyncio.create_task(_stopper())
+    feed_gen = feed.run()
     try:
-        async for _ in feed.run():
+        async for _ in feed_gen:
             if stop.is_set():
                 break
     finally:
         stop.set()
+        await feed_gen.aclose()  # 确定性关闭 WS/REST 连接
         await asyncio.gather(printer, stopper, return_exceptions=True)
         if recorder:
             recorder.flush()
