@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     # Proxy/Safe 模式下的资金地址
     funder_address: str = ""
     polygon_rpc_url: str = Field(default="https://polygon-rpc.com", repr=False)
+    # NegRiskAdapter（Polygon），多结果市场转换用；以官方文档为准
+    neg_risk_adapter: str = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
 
     # ---- CLOB L2 API 凭证（留空则后续用私钥派生）----
     clob_api_key: str = Field(default="", repr=False)
