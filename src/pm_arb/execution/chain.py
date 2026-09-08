@@ -162,6 +162,11 @@ class ChainClient:
 
     # ---- 读操作 ----
 
+    async def pol_balance(self) -> Decimal:
+        """原生 gas 代币 POL（原 MATIC）余额。"""
+        wei = await asyncio.to_thread(self.w3.eth.get_balance, self.address)
+        return Decimal(wei) / (10 ** 18)
+
     async def usdc_balance(self) -> Decimal:
         bal = await asyncio.to_thread(
             self.usdc.functions.balanceOf(self.address).call
@@ -199,6 +204,23 @@ class ChainClient:
     async def ensure_ctf_approval(self) -> str | None:
         """split 需要 CTF 合约动用 USDC。"""
         return await self.ensure_allowance(self.addrs.conditional_tokens)
+
+    async def ctf_is_approved_for_all(self, operator: str) -> bool:
+        """operator（通常是 Exchange）是否可转移该地址持有的 CTF 头寸。"""
+        return await asyncio.to_thread(
+            self.ctf.functions.isApprovedForAll(self.address, operator).call
+        )
+
+    async def ensure_ctf_operator_approval(self, operator: str | None = None) -> str | None:
+        """setApprovalForAll：允许 Exchange 卖出/转移持有的预测代币。
+
+        卖出 YES/NO 头寸时必需（幂等，已授权则跳过）。
+        """
+        op = operator or self.addrs.exchange
+        if await self.ctf_is_approved_for_all(op):
+            return None
+        log.info("chain_ctf_set_approval_for_all", operator=op)
+        return await self._send(self.ctf.functions.setApprovalForAll(op, True))
 
     # ---- split / merge / redeem ----
 

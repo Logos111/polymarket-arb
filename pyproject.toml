@@ -19,6 +19,7 @@ dependencies = [
 [project.scripts]
 pm-doctor = "pm_arb.app.doctor:main"
 pm-watch = "pm_arb.app.watch:main"
+pm-setup = "pm_arb.app.setup:main"
 
 [dependency-groups]
 dev = [
