@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     # Polygon 交易钱包私钥（小额专用钱包）；日志/打印中永不明文输出
     private_key: str = Field(default="", repr=False)
     chain_id: int = 137
+    # Chainlink 喂价读取 RPC（5min 市场结算价同源；polygon-rpc.com 已 401，默认公共节点）
+    price_feed_rpc_url: str = "https://polygon-bor-rpc.publicnode.com"
     # 0=EOA 直连；1=Polymarket Proxy；2=Gnosis Safe
     signature_type: int = 0
     # Proxy/Safe 模式下的资金地址
