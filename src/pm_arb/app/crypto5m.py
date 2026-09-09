@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from pm_arb.data.clob_rest import ClobRestClient
-from pm_arb.data.crypto_5m import current_window_start, discover_market, up_down_tokens
+from pm_arb.data.crypto_5m import current_window_start, get_window_market, up_down_tokens
 from pm_arb.data.feed import MarketDataFeed
 from pm_arb.data.gamma import GammaClient
 from pm_arb.data.orderbook import LocalOrderBook
@@ -40,7 +40,7 @@ async def _collect(symbols: list[str]) -> list[dict]:
     out: list[dict] = []
     async with GammaClient() as gamma:
         for sym in symbols:
-            m = await discover_market(gamma, sym)
+            m = await get_window_market(gamma, sym)
             if m is None:
                 log.warning("crypto5m_no_market", symbol=sym)
                 continue

@@ -32,7 +32,7 @@ import time
 from decimal import Decimal
 
 from pm_arb.data.clob_rest import ClobRestClient
-from pm_arb.data.crypto_5m import discover_market, up_down_tokens
+from pm_arb.data.crypto_5m import get_window_market, up_down_tokens
 from pm_arb.data.gamma import GammaClient
 from pm_arb.data.models import Market
 from pm_arb.infra.config import Settings, get_settings
@@ -122,17 +122,13 @@ async def fetch_raw_market(slug: str, s: Settings) -> dict | None:
 async def books(rest: ClobRestClient, up: str, down: str) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for name, tid in (("Up", up), ("Down", down)):
-        ev = await rest.get_book(tid)
-        if ev is None:
-            out[name] = {}
-            continue
-        bids = sorted(ev.bids, key=lambda l: l.price, reverse=True)
-        asks = sorted(ev.asks, key=lambda l: l.price)
+        ob = await rest.get_book(tid)  # 上游返回 OrderBook（空盘口时 best_* 为 None）
+        bb, ba = ob.best_bid, ob.best_ask
         out[name] = {
-            "best_bid": bids[0].price if bids else None,
-            "best_ask": asks[0].price if asks else None,
-            "bid_size": bids[0].size if bids else None,
-            "ask_size": asks[0].size if asks else None,
+            "best_bid": bb.price if bb else None,
+            "best_ask": ba.price if ba else None,
+            "bid_size": bb.size if bb else None,
+            "ask_size": ba.size if ba else None,
         }
     return out
 
@@ -187,7 +183,7 @@ async def try_window(symbol: str, dry: bool, max_windows: int) -> int:
         print(f"\n[窗口 {attempt}] 起点 {ws}（本地 {time.strftime('%H:%M:%S')}），开始持续监测 …")
 
         async with GammaClient() as gamma:
-            m: Market | None = await discover_market(gamma, symbol)
+            m: Market | None = await get_window_market(gamma, symbol)
         if m is None:
             print("  ❌ 未发现当前窗口市场，跳过。")
             continue
