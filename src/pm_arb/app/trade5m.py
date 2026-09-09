@@ -7,11 +7,11 @@
      市场描述明确写明按 Chainlink BTC/USD TWAP 结算）；
    - 双边盘口：Up/Down token 的 best bid/ask（CLOB REST /book）；
    同时记录本窗口 BTC 价格高低点；
-3. 入场（窗口第 90–120 秒，即剩余 3:30–3:00，条件全部满足才买）：
-   a. 本窗口 BTC 价格波动（high-low）< $20；
+3. 入场（窗口第 105–135 秒，即剩余 3:15–2:45，条件全部满足才买）：
+   a. 本窗口 BTC 价格波动（high-low）< $25；
    b. 冷门方（更便宜一边）best_ask < 0.30（30 点）；
 4. 买入冷门方吃单（FOK），名义金额 ≈ $2：份数 = ceil($2/ask)，不低于 orderMinSize；
-5. 止盈：best_bid >= 买入价 ×1.5 时市价卖出（+50%）；
+5. 止盈：best_bid >= 买入价 ×2.0 时市价卖出（+100%）；
 6. 未止盈则拿到结算：对每份赎 $1，错归 $0。
 
 不满足入场条件则等下一个窗口重试（--windows 上限，默认 3）。
@@ -41,11 +41,11 @@ from pm_arb.infra.logging import get_logger, setup_logging
 log = get_logger(__name__)
 
 TARGET_NOTIONAL = Decimal("2.00")   # 名义金额 $2
-ENTRY_AFTER = 90                     # 开窗后 90s（剩余 3:30）
-ENTRY_UNTIL = 120                    # 开窗后 120s（剩余 3:00）
-TAKE_PROFIT_RATIO = Decimal("1.5")   # +50% 止盈
+ENTRY_AFTER = 105                    # 开窗后 105s（剩余 3:15）
+ENTRY_UNTIL = 135                    # 开窗后 135s（剩余 2:45）
+TAKE_PROFIT_RATIO = Decimal("2.0")   # +100% 止盈
 MAX_ENTRY = Decimal("0.30")          # 冷门方入场价上限（30 点）
-MAX_VOL = Decimal("20")              # 本窗口 BTC 波动上限（USD）
+MAX_VOL = Decimal("25")              # 本窗口 BTC 波动上限（USD）
 POLL = 2.0                           # 监测轮询间隔
 TRACE_EVERY = 10.0                   # 行情轨迹打印间隔（秒）
 END_MARGIN = 20                      # 结算前 N 秒停止操作
@@ -169,7 +169,7 @@ async def try_window(symbol: str, dry: bool, max_windows: int) -> int:
     feed_rpc = s.price_feed_rpc_url
     print(f"=== 5min {symbol.upper()} 单笔交易  {'[DRY-RUN]' if dry else '[LIVE 真实资金]'} ===")
     print(f"    入场过滤: 窗口BTC波动<${MAX_VOL} 且 冷门方ask<{MAX_ENTRY}（开窗后{ENTRY_AFTER}-{ENTRY_UNTIL}s）")
-    print(f"    BTC喂价: Chainlink on Polygon（{feed_rpc}）｜止盈 +50%｜未止盈拿到结算")
+    print(f"    BTC喂价: Chainlink on Polygon（{feed_rpc}）｜止盈 +100%｜未止盈拿到结算")
 
     trader = None
     if not dry:
@@ -179,15 +179,28 @@ async def try_window(symbol: str, dry: bool, max_windows: int) -> int:
 
     for attempt in range(1, max_windows + 1):
         ws = await wait_next_window_start()
-        feed = ChainlinkFeed(symbol, feed_rpc, s.proxy_url or None)
+        # 实测 publicnode 直连可达，而本地代理对该 RPC 返回空体，喂价轮询走直连
+        feed = ChainlinkFeed(symbol, feed_rpc, None)
         print(f"\n[窗口 {attempt}] 起点 {ws}（本地 {time.strftime('%H:%M:%S')}），开始持续监测 …")
 
-        async with GammaClient() as gamma:
-            m: Market | None = await get_window_market(gamma, symbol)
-        if m is None:
-            print("  ❌ 未发现当前窗口市场，跳过。")
+        # 窗口起点代理偶发抖动时（本地 Clash 实测有过 ~1 分钟断流），有限重试引导，
+        # 避免一次网络故障浪费整个窗口
+        m: Market | None = None
+        raw: dict | None = None
+        for boot_attempt in range(6):
+            try:
+                async with GammaClient() as gamma:
+                    m = await get_window_market(gamma, symbol)
+                if m is not None:
+                    raw = await fetch_raw_market(m.slug, s)
+                if raw is not None:
+                    break
+            except Exception as e:
+                print(f"  [引导] 第 {boot_attempt + 1} 次取市场失败：{str(e)[:80]}")
+            await asyncio.sleep(5)
+        if m is None or raw is None:
+            print("  ❌ 引导重试后仍未取得当前窗口市场，跳过。")
             continue
-        raw = await fetch_raw_market(m.slug, s)
         min_size = int(raw.get("orderMinSize") or 5)
         if not raw.get("enableOrderBook"):
             print(f"  ❌ 市场不接受下单（enableOrderBook=False），跳过。")
@@ -196,6 +209,8 @@ async def try_window(symbol: str, dry: bool, max_windows: int) -> int:
         print(f"  市场: {m.question}  (minSize={min_size})")
 
         entered = False
+        entry_done = False  # 已做出最终判定（成交 / 波动超限等不可恢复拒绝）
+        last_ask_reject: Decimal | None = None  # ask 拒绝只在价格变化时打印
         side_name: str | None = None
         entry_price: Decimal | None = None
         filled = Decimal(0)
@@ -207,10 +222,16 @@ async def try_window(symbol: str, dry: bool, max_windows: int) -> int:
             while int(time.time()) < deadline:
                 elapsed = time.time() - ws
                 await feed.poll_once()
-                b = await books(rest, up, down)
+                try:
+                    b = await books(rest, up, down)
+                except Exception as e:
+                    # 盘口瞬时拉取失败不致命：本轮跳过，等下一个 2s 轮询
+                    print(f"  [盘口] 拉取失败，下轮重试：{str(e)[:80]}")
+                    await asyncio.sleep(POLL)
+                    continue
 
-                # ---- 行情轨迹 ----
-                if elapsed - last_trace >= TRACE_EVERY or dry:
+                # ---- 行情轨迹（固定 10s 一档，dry/live 一致）----
+                if elapsed - last_trace >= TRACE_EVERY:
                     last_trace = elapsed
                     ua = b["Up"].get("best_ask")
                     ub = b["Up"].get("best_bid")
@@ -224,16 +245,21 @@ async def try_window(symbol: str, dry: bool, max_windows: int) -> int:
                           f"range={_fmt(feed.price_range, 7)}  "
                           f"Up {_fmt(ub)}/{_fmt(ua)}  Down {_fmt(db)}/{_fmt(da)}{pos}")
 
-                # ---- 入场判定（开窗后 90–120s，一次性）----
-                if not entered and ENTRY_AFTER <= elapsed <= ENTRY_UNTIL:
+                # ---- 入场判定（开窗后 105–135s）。波动 high-low 单调不减，
+                #      一旦超限即永久拒绝；ask 可能回落，仅在价格变化时打印 ----
+                if not entered and not entry_done and ENTRY_AFTER <= elapsed <= ENTRY_UNTIL:
                     cand, ask = pick_underdog(b)
                     rng = feed.price_range
                     if ask is None or rng is None:
                         print(f"  [入场检查] 数据不全（ask={ask} range={rng}），本窗口放弃。")
-                    elif ask >= MAX_ENTRY:
-                        print(f"  [入场检查] ❌ 冷门方 {cand} ask={_fmt(ask)} ≥ {MAX_ENTRY}，跳过。")
+                        entry_done = True
                     elif rng >= MAX_VOL:
-                        print(f"  [入场检查] ❌ BTC 波动 ${rng:.2f} ≥ ${MAX_VOL}，跳过。")
+                        print(f"  [入场检查] ❌ BTC 波动 ${rng:.2f} ≥ ${MAX_VOL}，本窗口放弃。")
+                        entry_done = True
+                    elif ask >= MAX_ENTRY:
+                        if ask != last_ask_reject:
+                            print(f"  [入场检查] … 冷门方 {cand} ask={_fmt(ask)} ≥ {MAX_ENTRY}，继续观察")
+                            last_ask_reject = ask
                     else:
                         size = calc_size(ask, min_size)
                         token_id = up if cand == "Up" else down
@@ -296,7 +322,7 @@ async def try_window(symbol: str, dry: bool, max_windows: int) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="5min 加密单笔交易（冷门方 +50% 止盈）")
+    parser = argparse.ArgumentParser(description="5min 加密单笔交易（冷门方 +100% 止盈）")
     parser.add_argument("--symbol", default="btc", choices=["btc", "eth"])
     parser.add_argument("--dry-run", action="store_true", help="不真实下单，只模拟观察")
     parser.add_argument("--windows", type=int, default=3, help="最多尝试的窗口数（默认 3）")
