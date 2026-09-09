@@ -42,7 +42,7 @@ class ClobTrader:
         s = self._settings
 
         kwargs: dict = {"chain_id": s.chain_id, "signature_type": s.signature_type}
-        if s.funder_address:
+        if s.signature_type != 0 and s.funder_address:
             kwargs["funder"] = s.funder_address
         if s.has_clob_creds:
             from py_clob_client.clob_types import ApiCreds
