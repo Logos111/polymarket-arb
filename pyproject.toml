@@ -13,7 +13,7 @@ dependencies = [
     "tenacity>=8.2",
     "python-dotenv>=1.0",
     "web3>=6.17",
-    "py-clob-client>=0.17",
+    "py-clob-client-v2>=1.1.0",
 ]
 
 [project.scripts]

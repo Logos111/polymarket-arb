@@ -85,7 +85,7 @@ class ChainAddresses:
 
 
 def _load_addresses(chain_id: int, neg_risk_adapter: str) -> ChainAddresses:
-    from py_clob_client.config import get_contract_config
+    from py_clob_client_v2.config import get_contract_config
 
     cc = get_contract_config(chain_id)
     return ChainAddresses(

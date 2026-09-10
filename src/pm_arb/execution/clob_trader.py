@@ -1,6 +1,6 @@
-"""实盘交易客户端：封装 py-clob-client 的认证与下单。
+"""实盘交易客户端：封装 py-clob-client-v2 的认证与下单。
 
-- py-clob-client 是同步库（requests），所有调用通过 ``asyncio.to_thread``
+- py-clob-client-v2 是同步库（requests），所有调用通过 ``asyncio.to_thread``
   包装，避免阻塞事件循环；
 - 认证两级：L1（钱包私钥 EIP-712）派生/注册 API key → L2（key/secret/
   passphrase 签名请求头）；
@@ -23,7 +23,7 @@ log = get_logger(__name__)
 
 
 def _apply_proxy_env(settings: Settings) -> None:
-    """py-clob-client（requests）与 web3 均信任环境变量代理。"""
+    """py-clob-client-v2（requests）与 web3 均信任环境变量代理。"""
     if settings.proxy_url:
         os.environ.setdefault("HTTPS_PROXY", settings.proxy_url)
         os.environ.setdefault("HTTP_PROXY", settings.proxy_url)
@@ -35,7 +35,7 @@ class ClobTrader:
     """实盘 CLOB 交易客户端。优先用 ``ClobTrader.authenticated()`` 构造。"""
 
     def __init__(self, settings: Settings | None = None):
-        from py_clob_client.client import ClobClient
+        from py_clob_client_v2.client import ClobClient
 
         self._settings = settings or get_settings()
         _apply_proxy_env(self._settings)
@@ -45,7 +45,7 @@ class ClobTrader:
         if s.signature_type != 0 and s.funder_address:
             kwargs["funder"] = s.funder_address
         if s.has_clob_creds:
-            from py_clob_client.clob_types import ApiCreds
+            from py_clob_client_v2.clob_types import ApiCreds
 
             kwargs["creds"] = ApiCreds(
                 api_key=s.clob_api_key,
@@ -73,11 +73,11 @@ class ClobTrader:
 
     def _derive_l2_creds(self) -> None:
         """用 L1 私钥派生（或注册）L2 API 凭证并装载。"""
-        from py_clob_client.clob_types import ApiCreds
+        from py_clob_client_v2.clob_types import ApiCreds
 
         log.info("clob_deriving_api_creds", signature_type=self._settings.signature_type)
         # 同步 SDK，直接调用（构造阶段尚未进入事件循环）
-        derived = self._client.create_or_derive_api_creds()
+        derived = self._client.create_or_derive_api_key()
         creds = ApiCreds(
             api_key=derived.api_key,
             api_secret=derived.api_secret,
@@ -106,8 +106,8 @@ class ClobTrader:
         neg_risk: bool = False,
     ) -> Order:
         """下限价单。返回带状态的 Order（失败时状态为 REJECTED/FAILED）。"""
-        from py_clob_client.clob_types import OrderArgs, PartialCreateOrderOptions
-        from py_clob_client.clob_types import OrderType as PyOrderType
+        from py_clob_client_v2.clob_types import OrderArgs, PartialCreateOrderOptions
+        from py_clob_client_v2.clob_types import OrderType as PyOrderType
 
         order = Order(
             token_id=token_id,
@@ -126,9 +126,8 @@ class ClobTrader:
                 side=side.value,
             )
             options = PartialCreateOrderOptions(neg_risk=neg_risk)
-            signed = self._client.create_order(args, options)
             py_type = getattr(PyOrderType, order_type.value)
-            return self._client.post_order(signed, py_type, post_only)
+            return self._client.create_and_post_order(args, options, py_type, post_only)
 
         try:
             resp = await asyncio.to_thread(_do)
@@ -154,8 +153,12 @@ class ClobTrader:
         return order
 
     async def cancel(self, exchange_id: str) -> bool:
+        from py_clob_client_v2.clob_types import OrderPayload
+
         try:
-            resp = await asyncio.to_thread(self._client.cancel, exchange_id)
+            resp = await asyncio.to_thread(
+                self._client.cancel_order, OrderPayload(orderID=exchange_id)
+            )
             log.info("order_cancel_sent", exchange_id=exchange_id, resp=resp)
             return True
         except Exception as e:
@@ -179,14 +182,14 @@ class ClobTrader:
         return await asyncio.to_thread(self._client.get_order, exchange_id)
 
     async def get_open_orders(self, market: str | None = None) -> list[dict]:
-        from py_clob_client.clob_types import OpenOrderParams
+        from py_clob_client_v2.clob_types import OpenOrderParams
 
         params = OpenOrderParams(market=market) if market else None
-        resp = await asyncio.to_thread(self._client.get_orders, params)
+        resp = await asyncio.to_thread(self._client.get_open_orders, params)
         return resp if isinstance(resp, list) else resp.get("data", [])
 
     async def get_trades(self, market: str | None = None) -> list[dict]:
-        from py_clob_client.clob_types import TradeParams
+        from py_clob_client_v2.clob_types import TradeParams
 
         params = TradeParams(market=market) if market else None
         resp = await asyncio.to_thread(self._client.get_trades, params)
@@ -194,7 +197,7 @@ class ClobTrader:
 
     async def get_balance_allowance(self, asset_type: str = "COLLATERAL") -> dict:
         """查询 CTF 交易所视角的余额/授权（资产类型 COLLATERAL / CONDITIONAL）。"""
-        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
         at = AssetType.COLLATERAL if asset_type == "COLLATERAL" else AssetType.CONDITIONAL
         params = BalanceAllowanceParams(asset_type=at, signature_type=self._settings.signature_type)
@@ -202,7 +205,7 @@ class ClobTrader:
 
     async def update_balance_allowance(self, asset_type: str = "COLLATERAL") -> dict:
         """触发交易所刷新余额/授权缓存（下单前若提示需要 approve 时调用）。"""
-        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
         at = AssetType.COLLATERAL if asset_type == "COLLATERAL" else AssetType.CONDITIONAL
         params = BalanceAllowanceParams(asset_type=at, signature_type=self._settings.signature_type)
