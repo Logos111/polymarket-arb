@@ -21,6 +21,16 @@ cp .env.example .env
 uv run pytest -q
 ```
 
+5min 加密单笔交易实盘（`pm_arb.app.trade5m`）运行时会把行情轨迹与决策写入
+`data/logs/trade5m_<时间戳>.log`，可实时跟踪：
+
+```bash
+# 实时查看最新一次会话日志
+tail -f "$(ls -t data/logs/trade5m_*.log | head -1)"
+# 停止正在运行的实例
+pkill -f "pm_arb.app.trade5m"
+```
+
 只读行情功能（市场发现、盘口订阅、订单簿构建）**无需任何凭证**；
 下单与链上操作（split/merge/redeem）需要配置私钥。
 

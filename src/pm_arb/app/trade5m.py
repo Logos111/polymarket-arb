@@ -16,23 +16,33 @@
 
 不满足入场条件则等下一个窗口重试（--windows 上限，默认 3）。
 
+可视化：
+- 交互式终端（TTY）：清屏实时仪表盘，每轮询（2s）刷新，含盘口、喂价、
+  过滤状态、入场/止盈判定与持仓浮盈，底部滚动最近决策事件；
+- 非 TTY（后台/管道）：滚动打印同样信息；
+- 始终追加写入 ``data/logs/trade5m_<ts>.log``，可 ``tail -f`` 实时查看。
+
 用法::
 
     PYTHONPATH=src python -m pm_arb.app.trade5m --symbol btc --dry-run
     PYTHONPATH=src python -m pm_arb.app.trade5m --symbol btc           # 真实下单
+    PYTHONPATH=src python -m pm_arb.app.trade5m --symbol btc --now     # 调试：不等待窗口起点
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import math
+import os
 import sys
 import time
 from decimal import Decimal
 
 from pm_arb.data.clob_rest import ClobRestClient
-from pm_arb.data.crypto_5m import get_window_market, up_down_tokens
+from pm_arb.data.crypto_5m import current_window_start, get_window_market, up_down_tokens
+from pm_arb.data.feed import MarketDataFeed
 from pm_arb.data.gamma import GammaClient
 from pm_arb.data.models import Market
 from pm_arb.infra.config import Settings, get_settings
@@ -47,8 +57,8 @@ TAKE_PROFIT_RATIO = Decimal("2.0")   # +100% 止盈
 MAX_ENTRY = Decimal("0.30")          # 冷门方入场价上限（30 点）
 MAX_VOL = Decimal("25")              # 本窗口 BTC 波动上限（USD）
 POLL = 2.0                           # 监测轮询间隔
-TRACE_EVERY = 10.0                   # 行情轨迹打印间隔（秒）
 END_MARGIN = 20                      # 结算前 N 秒停止操作
+LOG_DIR = os.path.join("data", "logs")
 
 # Polygon 主网 Chainlink 聚合器（与 5min 市场结算同源；answer 8 位小数）
 CHAINLINK_FEEDS: dict[str, str] = {
@@ -60,6 +70,69 @@ _LATEST_ROUND_DATA = "0xfeaf968c"  # latestRoundData() selector
 
 def _fmt(d: Decimal | None, w: int = 6) -> str:
     return f"{d:.3f}".rjust(w) if d is not None else "n/a".rjust(w)
+
+
+class SessionLog:
+    """决策/行情日志：写文件 + （非 TTY 时）滚动打印 + （TTY 时）事件尾缓冲。"""
+
+    def __init__(self, tui: bool) -> None:
+        self.tui = tui
+        os.makedirs(LOG_DIR, exist_ok=True)
+        self.path = os.path.join(LOG_DIR, f"trade5m_{time.strftime('%Y%m%d_%H%M%S')}.log")
+        self._f = open(self.path, "a", encoding="utf-8")  # noqa: SIM115
+        self.events: list[str] = []
+
+    def line(self, msg: str, event: bool = False) -> None:
+        rec = f"[{time.strftime('%H:%M:%S')}] {msg}"
+        self._f.write(rec + "\n")
+        self._f.flush()
+        if event:
+            self.events.append(msg)
+            self.events = self.events[-10:]
+        if not self.tui:
+            print(msg, flush=True)
+
+    def close(self) -> None:
+        self._f.close()
+
+
+def _render_tui(st: dict, sl: SessionLog) -> None:
+    """清屏刷新实时仪表盘。"""
+    L: list[str] = ["\033[2J\033[H" + "=" * 74]
+    hdr = (f" 5min {st['symbol'].upper()}  {st['mode']:<16} "
+           f"窗口 {st['attempt']}/{st['max_windows']}")
+    L.append(hdr + f"   t+{st['elapsed']:>5.0f}s  剩余 {st['remain']:>3.0f}s")
+    L.append("-" * 74)
+    rng = st["btc_range"]
+    vol_ok = rng is not None and rng < MAX_VOL
+    L.append(f" Chainlink BTC  last={_fmt(st['btc_last'], 11)}  high={_fmt(st['btc_high'], 11)}"
+             f"  low={_fmt(st['btc_low'], 11)}")
+    L.append(f" 窗口波动 range={_fmt(rng, 8)}  过滤(<${MAX_VOL}): "
+             f"{'✅ 通过' if vol_ok else '❌ 超限' if rng is not None else '… 采样中'}")
+    L.append("-" * 74)
+    L.append(f" {'side':<6}{'best_bid':>10}{'best_ask':>10}")
+    for name in ("Up", "Down"):
+        bk = st["book"][name]
+        L.append(f" {name:<6}{_fmt(bk['best_bid'], 10)}{_fmt(bk['best_ask'], 10)}")
+    ud, ua = st["underdog"], st["ud_ask"]
+    ask_ok = ua is not None and ua < MAX_ENTRY
+    L.append(f" 冷门方={ud:<5} ask={_fmt(ua)}  过滤(<{MAX_ENTRY}): "
+             f"{'✅' if ask_ok else '❌' if ua is not None else '…'}")
+    L.append(f" 入场窗口[{ENTRY_AFTER},{ENTRY_UNTIL}s]: {st['entry_status']}")
+    L.append("-" * 74)
+    if st["pos_side"]:
+        L.append(f" 持仓 {st['pos_side']} {st['pos_filled']} 份 @ {st['pos_entry']}"
+                 f"  现bid={_fmt(st['pos_bid'])}  浮盈 {st['pos_pnl']:+.3f}"
+                 f"  止盈线 {st['tp_target']}")
+    else:
+        L.append(" 持仓: 无")
+    L.append("=" * 74)
+    L.append(" 最近事件:")
+    for ev in sl.events[-6:]:
+        L.append(f"   · {ev[:70]}")
+    L.append("=" * 74)
+    L.append(f" Ctrl+C 退出  |  日志 {sl.path}")
+    print("\n".join(L), flush=True)
 
 
 class ChainlinkFeed:
@@ -133,6 +206,23 @@ async def books(rest: ClobRestClient, up: str, down: str) -> dict[str, dict]:
     return out
 
 
+def books_from_feed(feed: MarketDataFeed, up: str, down: str) -> dict[str, dict] | None:
+    """从 WS 维护的本地簿读实时最优价；未就绪返回 None（调用方回退 REST）。"""
+    out: dict[str, dict] = {}
+    for name, tid in (("Up", up), ("Down", down)):
+        ob = feed.books().get(tid)
+        if ob is None or not ob.ready:
+            return None
+        bb, ba = ob.best_bid, ob.best_ask
+        out[name] = {
+            "best_bid": bb.price if bb else None,
+            "best_ask": ba.price if ba else None,
+            "bid_size": bb.size if bb else None,
+            "ask_size": ba.size if ba else None,
+        }
+    return out
+
+
 def pick_underdog(b: dict[str, dict]) -> tuple[str, Decimal | None]:
     """返回 (side_name, best_ask) —— 更便宜的一方。"""
     up_ask = b["Up"].get("best_ask")
@@ -160,16 +250,20 @@ async def wait_next_window_start() -> int:
         await asyncio.sleep(min(wait - 1, 10.0))
 
 
-async def try_window(symbol: str, dry: bool, max_windows: int) -> int:
+async def try_window(symbol: str, dry: bool, max_windows: int, now: bool = False) -> int:
     s = get_settings()
     if not s.has_private_key:
         print("未配置 PM_PRIVATE_KEY，无法交易。")
         return 1
 
+    tui = sys.stdout.isatty()
+    sl = SessionLog(tui)
     feed_rpc = s.price_feed_rpc_url
-    print(f"=== 5min {symbol.upper()} 单笔交易  {'[DRY-RUN]' if dry else '[LIVE 真实资金]'} ===")
-    print(f"    入场过滤: 窗口BTC波动<${MAX_VOL} 且 冷门方ask<{MAX_ENTRY}（开窗后{ENTRY_AFTER}-{ENTRY_UNTIL}s）")
-    print(f"    BTC喂价: Chainlink on Polygon（{feed_rpc}）｜止盈 +100%｜未止盈拿到结算")
+    mode = "[DRY-RUN]" if dry else "[LIVE 真实资金]"
+    sl.line(f"=== 5min {symbol.upper()} 单笔交易  {mode} ===", event=True)
+    sl.line(f"入场过滤: 窗口BTC波动<${MAX_VOL} 且 冷门方ask<{MAX_ENTRY}"
+            f"（开窗后{ENTRY_AFTER}-{ENTRY_UNTIL}s）｜止盈 +100%｜未止盈拿到结算")
+    sl.line(f"BTC喂价: Chainlink on Polygon（{feed_rpc}）｜日志: {sl.path}")
 
     trader = None
     if not dry:
@@ -178,10 +272,11 @@ async def try_window(symbol: str, dry: bool, max_windows: int) -> int:
         trader = ClobTrader(s)  # 构造时派生 L2 creds
 
     for attempt in range(1, max_windows + 1):
-        ws = await wait_next_window_start()
+        ws = current_window_start() if now else await wait_next_window_start()
         # 实测 publicnode 直连可达，而本地代理对该 RPC 返回空体，喂价轮询走直连
         feed = ChainlinkFeed(symbol, feed_rpc, None)
-        print(f"\n[窗口 {attempt}] 起点 {ws}（本地 {time.strftime('%H:%M:%S')}），开始持续监测 …")
+        sl.line(f"[窗口 {attempt}] 起点 {ws}（本地 {time.strftime('%H:%M:%S')}），开始持续监测 …",
+                event=True)
 
         # 窗口起点代理偶发抖动时（本地 Clash 实测有过 ~1 分钟断流），有限重试引导，
         # 避免一次网络故障浪费整个窗口
@@ -196,17 +291,17 @@ async def try_window(symbol: str, dry: bool, max_windows: int) -> int:
                 if raw is not None:
                     break
             except Exception as e:
-                print(f"  [引导] 第 {boot_attempt + 1} 次取市场失败：{str(e)[:80]}")
+                sl.line(f"[引导] 第 {boot_attempt + 1} 次取市场失败：{str(e)[:80]}")
             await asyncio.sleep(5)
         if m is None or raw is None:
-            print("  ❌ 引导重试后仍未取得当前窗口市场，跳过。")
+            sl.line("❌ 引导重试后仍未取得当前窗口市场，跳过。", event=True)
             continue
         min_size = int(raw.get("orderMinSize") or 5)
         if not raw.get("enableOrderBook"):
-            print(f"  ❌ 市场不接受下单（enableOrderBook=False），跳过。")
+            sl.line("❌ 市场不接受下单（enableOrderBook=False），跳过。", event=True)
             continue
         up, down = up_down_tokens(m)
-        print(f"  市场: {m.question}  (minSize={min_size})")
+        sl.line(f"市场: {m.question}  (minSize={min_size})")
 
         entered = False
         entry_done = False  # 已做出最终判定（成交 / 波动超限等不可恢复拒绝）
@@ -216,108 +311,172 @@ async def try_window(symbol: str, dry: bool, max_windows: int) -> int:
         filled = Decimal(0)
         tp_hit = False
         deadline = ws + 300 - END_MARGIN
-        last_trace = 0.0
+
+        st = {
+            "symbol": symbol, "mode": mode, "attempt": attempt,
+            "max_windows": max_windows, "elapsed": 0.0, "remain": 300.0,
+            "btc_last": None, "btc_high": None, "btc_low": None, "btc_range": None,
+            "book": {"Up": {}, "Down": {}}, "underdog": "-", "ud_ask": None,
+            "entry_status": "等待中", "pos_side": None, "pos_entry": None,
+            "pos_filled": Decimal(0), "pos_bid": None, "pos_pnl": Decimal(0),
+            "tp_target": None,
+        }
+
+        mfeed = MarketDataFeed([up, down])
+        stop_feed = asyncio.Event()
+
+        async def _run_feed(mf: MarketDataFeed, stop: asyncio.Event) -> None:
+            gen = mf.run()
+            try:
+                async for _ in gen:
+                    if stop.is_set():
+                        break
+            finally:
+                with contextlib.suppress(Exception):
+                    await gen.aclose()
+
+        feed_task = asyncio.create_task(_run_feed(mfeed, stop_feed))
 
         async with ClobRestClient() as rest:
             while int(time.time()) < deadline:
                 elapsed = time.time() - ws
                 await feed.poll_once()
-                try:
-                    b = await books(rest, up, down)
-                except Exception as e:
-                    # 盘口瞬时拉取失败不致命：本轮跳过，等下一个 2s 轮询
-                    print(f"  [盘口] 拉取失败，下轮重试：{str(e)[:80]}")
-                    await asyncio.sleep(POLL)
-                    continue
+                # 优先 WS 实时簿；未就绪/断流时回退 REST 快照
+                b = books_from_feed(mfeed, up, down)
+                if b is None:
+                    try:
+                        b = await books(rest, up, down)
+                    except Exception as e:
+                        sl.line(f"[盘口] 拉取失败，下轮重试：{str(e)[:80]}")
+                        await asyncio.sleep(POLL)
+                        continue
 
-                # ---- 行情轨迹（固定 10s 一档，dry/live 一致）----
-                if elapsed - last_trace >= TRACE_EVERY:
-                    last_trace = elapsed
-                    ua = b["Up"].get("best_ask")
-                    ub = b["Up"].get("best_bid")
-                    da = b["Down"].get("best_ask")
-                    db = b["Down"].get("best_bid")
-                    pos = ""
-                    if entered:
-                        pnl = (b[side_name].get("best_bid") or entry_price) - entry_price
-                        pos = f"  [持仓 {side_name} @{entry_price} 浮动 {pnl:+.3f}]"
-                    print(f"  t+{elapsed:>5.0f}s  BTC={_fmt(feed.last, 9)} "
-                          f"range={_fmt(feed.price_range, 7)}  "
-                          f"Up {_fmt(ub)}/{_fmt(ua)}  Down {_fmt(db)}/{_fmt(da)}{pos}")
+                cand, ask = pick_underdog(b)
+                # ---- 刷新状态 ----
+                st.update(
+                    elapsed=elapsed, remain=max(0.0, deadline - time.time()),
+                    btc_last=feed.last, btc_high=feed.high, btc_low=feed.low,
+                    btc_range=feed.price_range, book=b, underdog=cand, ud_ask=ask,
+                )
+                if entered and side_name:
+                    st["pos_bid"] = b[side_name].get("best_bid")
+                    cur = st["pos_bid"] or entry_price or Decimal(0)
+                    st["pos_pnl"] = cur - (entry_price or Decimal(0))
+
+                # ---- 行情轨迹（写入日志，实时可 tail）----
+                ua, ub = b["Up"].get("best_ask"), b["Up"].get("best_bid")
+                da, db = b["Down"].get("best_ask"), b["Down"].get("best_bid")
+                pos = ""
+                if entered:
+                    pnl = (b[side_name].get("best_bid") or entry_price) - entry_price
+                    pos = f"  [持仓 {side_name} @{entry_price} 浮动 {pnl:+.3f}]"
+                sl.line(f"t+{elapsed:>5.0f}s  BTC={_fmt(feed.last, 9)} "
+                        f"range={_fmt(feed.price_range, 7)}  "
+                        f"Up {_fmt(ub)}/{_fmt(ua)}  Down {_fmt(db)}/{_fmt(da)}{pos}")
 
                 # ---- 入场判定（开窗后 105–135s）。波动 high-low 单调不减，
                 #      一旦超限即永久拒绝；ask 可能回落，仅在价格变化时打印 ----
                 if not entered and not entry_done and ENTRY_AFTER <= elapsed <= ENTRY_UNTIL:
-                    cand, ask = pick_underdog(b)
+                    st["entry_status"] = "判定中"
                     rng = feed.price_range
                     if ask is None or rng is None:
-                        print(f"  [入场检查] 数据不全（ask={ask} range={rng}），本窗口放弃。")
+                        sl.line(f"[入场检查] 数据不全（ask={ask} range={rng}），放弃。",
+                                event=True)
+                        st["entry_status"] = "放弃(数据不全)"
                         entry_done = True
                     elif rng >= MAX_VOL:
-                        print(f"  [入场检查] ❌ BTC 波动 ${rng:.2f} ≥ ${MAX_VOL}，本窗口放弃。")
+                        sl.line(f"[入场检查] ❌ 波动 ${rng:.2f} ≥ ${MAX_VOL}，放弃。",
+                                event=True)
+                        st["entry_status"] = f"放弃(波动${rng:.0f})"
                         entry_done = True
                     elif ask >= MAX_ENTRY:
+                        st["entry_status"] = f"观察(ask{ask}≥{MAX_ENTRY})"
                         if ask != last_ask_reject:
-                            print(f"  [入场检查] … 冷门方 {cand} ask={_fmt(ask)} ≥ {MAX_ENTRY}，继续观察")
+                            sl.line(f"[入场检查] … {cand} ask={_fmt(ask)} ≥ {MAX_ENTRY}，观察")
                             last_ask_reject = ask
                     else:
                         size = calc_size(ask, min_size)
                         token_id = up if cand == "Up" else down
-                        print(f"  [入场检查] ✅ {cand} ask={_fmt(ask)} 波动${rng:.2f}"
-                              f" → 买 {size} 份 ≈ ${ask * size:.2f}，止盈价 {_fmt(ask * TAKE_PROFIT_RATIO)}")
+                        tp = _fmt(ask * TAKE_PROFIT_RATIO)
+                        sl.line(f"[入场检查] ✅ {cand} ask={_fmt(ask)} 波动${rng:.2f}"
+                                f" → 买 {size} 份 ≈ ${ask * size:.2f}，止盈 {tp}",
+                                event=True)
                         if trader is None:
                             entered, side_name, entry_price = True, cand, ask
                             filled = Decimal(size)
+                            st.update(pos_side=cand, pos_entry=ask, pos_filled=filled,
+                                      tp_target=ask * TAKE_PROFIT_RATIO)
+                            st["entry_status"] = f"已入场 {cand}"
                         else:
                             from pm_arb.execution.orders import OrderType, Side
 
                             order = await trader.place_limit(
                                 token_id, Side.BUY, ask, Decimal(size), order_type=OrderType.FOK
                             )
-                            print(f"  买单: {order.status.value} {order.error or ''}")
+                            sl.line(f"买单: {order.status.value} {order.error or ''}", event=True)
                             if order.status.value in ("FILLED", "PARTIAL"):
                                 entered = True
                                 side_name = cand
                                 entry_price = order.avg_fill_price or ask
                                 filled = order.filled_size
-                                print(f"  成交: {filled} 份 @ {entry_price}")
+                                st.update(pos_side=cand, pos_entry=entry_price, pos_filled=filled,
+                                          tp_target=entry_price * TAKE_PROFIT_RATIO)
+                                st["entry_status"] = f"已成交 {cand}"
+                                sl.line(f"成交: {filled} 份 @ {entry_price}", event=True)
                             else:
-                                print("  FOK 未成交，本窗口放弃。")
+                                st["entry_status"] = "FOK未成交"
+                                sl.line("FOK 未成交，本窗口放弃。", event=True)
                                 break
+                elif not entered and not entry_done:
+                    st["entry_status"] = (f"等待 t∈[{ENTRY_AFTER},{ENTRY_UNTIL}]"
+                                          if elapsed < ENTRY_AFTER else "已错过")
 
                 # ---- 止盈判定 ----
                 if entered and side_name is not None:
                     bb = b[side_name].get("best_bid")
                     if bb is not None and bb >= entry_price * TAKE_PROFIT_RATIO:
-                        print(f"  ✅ 触发止盈: bid {bb} >= {entry_price * TAKE_PROFIT_RATIO}")
+                        sl.line(f"✅ 止盈: bid {bb} >= {entry_price * TAKE_PROFIT_RATIO}",
+                                event=True)
                         token_id = up if side_name == "Up" else down
                         if trader is None:
-                            print(f"  [DRY] 模拟卖出 {filled} 份 @ {bb}，"
-                                  f"盈利 ≈ ${(bb - entry_price) * filled:+.2f}")
+                            sl.line(f"[DRY] 模拟卖出 {filled} 份 @ {bb}，"
+                                    f"盈利 ≈ ${(bb - entry_price) * filled:+.2f}", event=True)
                         else:
                             from pm_arb.execution.orders import OrderType, Side
 
                             o = await trader.place_limit(
                                 token_id, Side.SELL, bb, filled, order_type=OrderType.FOK
                             )
-                            print(f"  卖单: {o.status.value} {o.error or ''}")
+                            sl.line(f"卖单: {o.status.value} {o.error or ''}", event=True)
                             if o.status.value in ("FILLED", "PARTIAL") and o.avg_fill_price:
                                 pnl = (o.avg_fill_price - entry_price) * o.filled_size
-                                print(f"  平仓 PnL ≈ ${pnl:+.2f}")
+                                sl.line(f"平仓 PnL ≈ ${pnl:+.2f}", event=True)
                                 tp_hit = True
                                 break
                             # 未成交则下轮继续尝试
+
+                if tui:
+                    _render_tui(st, sl)
                 await asyncio.sleep(POLL)
+
+        stop_feed.set()
+        feed_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await feed_task
 
         if entered:
             if tp_hit:
+                sl.close()
                 return 0
-            print(f"  窗口到点未止盈（最后 BTC={_fmt(feed.last, 9)} range={_fmt(feed.price_range, 7)}）。"
-                  f"{'[DRY] ' if dry else ''}按规则持有到结算：对赎 $1/份，错归 $0。")
+            tail = "[DRY] " if dry else ""
+            sl.line(f"到点未止盈（BTC={_fmt(feed.last, 9)} range={_fmt(feed.price_range, 7)}）。"
+                    f"{tail}持有到结算：对赎 $1/份，错归 $0。", event=True)
+            sl.close()
             return 0
-        print(f"  本窗口未入场，进入下一个窗口（{attempt}/{max_windows}）。")
+        sl.line(f"本窗口未入场，进入下一个窗口（{attempt}/{max_windows}）。", event=True)
 
-    print(f"\n{max_windows} 个窗口均未满足入场条件，未交易。")
+    sl.line(f"{max_windows} 个窗口均未满足入场条件，未交易。", event=True)
+    sl.close()
     return 1
 
 
@@ -326,6 +485,8 @@ def main() -> int:
     parser.add_argument("--symbol", default="btc", choices=["btc", "eth"])
     parser.add_argument("--dry-run", action="store_true", help="不真实下单，只模拟观察")
     parser.add_argument("--windows", type=int, default=3, help="最多尝试的窗口数（默认 3）")
+    parser.add_argument("--now", action="store_true",
+                        help="调试：不等待窗口起点，直接监测当前进行中窗口")
     args = parser.parse_args()
 
     for stream in (sys.stdout, sys.stderr):
@@ -334,7 +495,7 @@ def main() -> int:
     setup_logging(level="WARNING")
 
     try:
-        return asyncio.run(try_window(args.symbol, args.dry_run, args.windows))
+        return asyncio.run(try_window(args.symbol, args.dry_run, args.windows, args.now))
     except KeyboardInterrupt:
         return 130
 

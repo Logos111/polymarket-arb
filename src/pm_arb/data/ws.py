@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import urllib.request
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 import websockets
@@ -33,13 +34,28 @@ _RECONNECT_DELAYS = [1, 2, 4, 8, 15, 30]
 WsEvent = WsBookEvent | WsPriceChange | WsLastTrade
 
 
+def _resolve_proxy(settings: Settings) -> str | None:
+    """决定 WS 连接使用的代理。
+
+    websockets 默认 ``proxy=True`` 会自动读取系统代理，在 macOS 上可能选中
+    SOCKS 条目（需额外安装 python-socks，否则抛 ImportError 静默断流）。
+    这里显式解析：优先 ``PM_PROXY_URL``，其次系统 http/https 代理（CONNECT 方式，
+    无需 socks 依赖），忽略 socks 条目；都没有则返回 None（直连）。
+    """
+    if settings.proxy_url:
+        return settings.proxy_url
+    gp = urllib.request.getproxies()
+    for key in ("https", "http"):
+        v = gp.get(key)
+        if v and v.startswith("http://"):
+            return v
+    return None
+
+
 def parse_message(raw: str | bytes) -> list[WsEvent]:
     """把一条原始 WS 消息解析为 typed events；无法识别的类型跳过。"""
     data = json.loads(raw)
-    if isinstance(data, dict):
-        messages = [data]
-    else:
-        messages = data
+    messages = [data] if isinstance(data, dict) else data
 
     events: list[WsEvent] = []
     for m in messages:
@@ -118,9 +134,9 @@ class MarketWsClient:
                     "ping_timeout": 20,
                     "close_timeout": 5,
                     "max_queue": 256,
+                    # 显式指定代理，避免自动选用系统 SOCKS 导致 ImportError
+                    "proxy": _resolve_proxy(self._settings),
                 }
-                if self._settings.proxy_url:
-                    connect_kwargs["proxy"] = self._settings.proxy_url
                 async with websockets.connect(self._url, **connect_kwargs) as ws:
                     sub = {"assets_ids": asset_ids, "type": "market"}
                     await ws.send(json.dumps(sub))
@@ -135,7 +151,7 @@ class MarketWsClient:
                         for event in parse_message(raw):
                             yield event
 
-            except (ConnectionClosed, OSError, asyncio.TimeoutError) as e:
+            except (ConnectionClosed, OSError, TimeoutError) as e:
                 delay = _RECONNECT_DELAYS[min(attempt, len(_RECONNECT_DELAYS) - 1)]
                 attempt += 1
                 log.warning("ws_disconnected", error=str(e)[:120], reconnect_in=delay)
@@ -143,3 +159,9 @@ class MarketWsClient:
             except asyncio.CancelledError:
                 log.info("ws_stream_cancelled")
                 raise
+            except Exception as e:  # 兜底：ImportError/SSL 等意外错误不应静默杀死流
+                delay = _RECONNECT_DELAYS[min(attempt, len(_RECONNECT_DELAYS) - 1)]
+                attempt += 1
+                log.warning("ws_unexpected_error", error=f"{type(e).__name__}: {e}"[:160],
+                            reconnect_in=delay)
+                await asyncio.sleep(delay)

@@ -42,10 +42,15 @@ def setup_logging(level: str = "INFO", json_logs: bool = False) -> None:
         ],
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
         logger_factory=structlog.PrintLoggerFactory(),
-        cache_logger_on_first_use=True,
+        cache_logger_on_first_use=False,
     )
 
 
 def get_logger(name: str | None = None, **bound):
-    """获取一个绑定了初始上下文的 structlog logger。"""
-    return structlog.get_logger(name).bind(**bound)
+    """获取一个绑定了初始上下文的 structlog logger。
+
+    无绑定参数时返回懒代理，使其在首次真正打日志时才解析配置，
+    从而尊重导入之后才调用的 ``setup_logging(level=...)``。
+    """
+    lg = structlog.get_logger(name)
+    return lg.bind(**bound) if bound else lg
