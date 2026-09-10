@@ -16,7 +16,8 @@
 5. 止盈：best_bid >= 0.65 时卖出（固定止盈价，与入场价无关）；
 6. 未止盈则拿到结算：对每份赎 $1，错归 $0。
 
-不满足入场条件则等下一个窗口重试（--windows 上限，默认 3）。
+不满足入场条件则等下一个窗口重试（--windows 上限，默认 3）；累计成交笔数达到
+--fills（默认 1）后停止。
 
 可视化：
 - 交互式终端（TTY）：清屏实时仪表盘，每轮询（2s）刷新，含盘口、喂价、
@@ -225,7 +226,9 @@ async def wait_next_window_start() -> int:
         await asyncio.sleep(min(wait - 1, 10.0))
 
 
-async def try_window(symbol: str, dry: bool, max_windows: int, now: bool = False) -> int:
+async def try_window(
+    symbol: str, dry: bool, max_windows: int, now: bool = False, max_fills: int = 1
+) -> int:
     s = get_settings()
     if not s.has_private_key:
         print("未配置 PM_PRIVATE_KEY，无法交易。")
@@ -244,6 +247,9 @@ async def try_window(symbol: str, dry: bool, max_windows: int, now: bool = False
         from pm_arb.execution.clob_trader import ClobTrader
 
         trader = ClobTrader(s)  # 构造时派生 L2 creds
+
+    fills_done = 0  # 累计成交笔数（达到 max_fills 停止）
+    realized_pnl = Decimal(0)  # 已止盈平仓的实现盈亏（持有到结算的仓位未计）
 
     for attempt in range(1, max_windows + 1):
         ws = current_window_start() if now else await wait_next_window_start()
@@ -496,6 +502,7 @@ async def try_window(symbol: str, dry: bool, max_windows: int, now: bool = False
                             if o.status.value in ("FILLED", "PARTIAL") and o.avg_fill_price:
                                 pnl = (o.avg_fill_price - entry_price) * o.filled_size
                                 sl.line(f"平仓 PnL ≈ ${pnl:+.2f}", event=True)
+                                realized_pnl += pnl
                                 tp_hit = True
                                 break
                             # 未成交则下轮继续尝试
@@ -513,19 +520,30 @@ async def try_window(symbol: str, dry: bool, max_windows: int, now: bool = False
             await feed_task
 
         if entered:
+            fills_done += 1
             if tp_hit:
+                sl.line(f"[成交 {fills_done}/{max_fills}] ✅ 已止盈平仓。", event=True)
+            else:
+                tail = "[DRY] " if dry else ""
+                sl.line(f"到点未止盈（TWAP={_fmt(rtds.last, 9)} "
+                        f"range={_fmt(rtds.price_range, 7)}）。"
+                        f"{tail}持有到结算：对赎 $1/份，错归 $0。", event=True)
+            if fills_done >= max_fills:
+                sl.line(f"=== 目标达成：{max_fills} 笔成交（尝试 {attempt}/{max_windows} 窗口）。"
+                        f"已止盈实现 PnL 累计 ${realized_pnl:+.2f}"
+                        f"（持有到结算的仓位待链上赎回，未计入） ===", event=True)
                 sl.close()
                 return 0
-            tail = "[DRY] " if dry else ""
-            sl.line(f"到点未止盈（TWAP={_fmt(rtds.last, 9)} range={_fmt(rtds.price_range, 7)}）。"
-                    f"{tail}持有到结算：对赎 $1/份，错归 $0。", event=True)
-            sl.close()
-            return 0
-        sl.line(f"本窗口未入场，进入下一个窗口（{attempt}/{max_windows}）。", event=True)
+            sl.line(f"已成交 {fills_done}/{max_fills} 笔"
+                    f"（已止盈 PnL ${realized_pnl:+.2f}），进入下一个窗口"
+                    f"（{attempt}/{max_windows}）。", event=True)
+        else:
+            sl.line(f"本窗口未入场，进入下一个窗口（{attempt}/{max_windows}）。", event=True)
 
-    sl.line(f"{max_windows} 个窗口均未满足入场条件，未交易。", event=True)
+    sl.line(f"=== {max_windows} 个窗口尝试完毕：成交 {fills_done}/{max_fills} 笔，"
+            f"已止盈实现 PnL ${realized_pnl:+.2f} ===", event=True)
     sl.close()
-    return 1
+    return 0 if fills_done else 1
 
 
 def main() -> int:
@@ -533,6 +551,8 @@ def main() -> int:
     parser.add_argument("--symbol", default="btc", choices=["btc", "eth"])
     parser.add_argument("--dry-run", action="store_true", help="不真实下单，只模拟观察")
     parser.add_argument("--windows", type=int, default=3, help="最多尝试的窗口数（默认 3）")
+    parser.add_argument("--fills", type=int, default=1,
+                        help="目标成交笔数：累计达到后停止（默认 1）")
     parser.add_argument("--now", action="store_true",
                         help="调试：不等待窗口起点，直接监测当前进行中窗口")
     args = parser.parse_args()
@@ -543,7 +563,9 @@ def main() -> int:
     setup_logging(level="WARNING")
 
     try:
-        return asyncio.run(try_window(args.symbol, args.dry_run, args.windows, args.now))
+        return asyncio.run(
+            try_window(args.symbol, args.dry_run, args.windows, args.now, args.fills)
+        )
     except KeyboardInterrupt:
         return 130
 
