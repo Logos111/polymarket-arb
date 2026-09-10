@@ -4,7 +4,7 @@
 1. Gamma 拉取活跃市场（默认按 24h 成交量排序，取流动性最好的前 N 个）；
 2. 订阅这些市场 YES/NO token 的 WS 行情，本地维护 L2 订单簿；
 3. 每秒打印一次各 token 的最优 bid/ask/价差；
-4. ``--record`` 时同时把 tick 数据录制到 data/ticks/。
+4. ``--record`` 时同时把 tick 数据录制到 runtime/ticks/。
 
 用法::
 
@@ -107,7 +107,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Polymarket 实时盘口监控（数据层联调）")
     parser.add_argument("--markets", type=int, default=3, help="订阅市场数量（默认 3）")
     parser.add_argument("--seconds", type=int, default=30, help="运行秒数（默认 30）")
-    parser.add_argument("--record", action="store_true", help="同时录制 tick 到 data/ticks/")
+    parser.add_argument("--record", action="store_true", help="同时录制 tick 到 runtime/ticks/")
     args = parser.parse_args()
 
     setup_logging(level="WARNING")  # 屏显模式下压制日志，避免打乱界面

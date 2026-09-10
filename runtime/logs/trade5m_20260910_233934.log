@@ -1,0 +1,79 @@
+[23:39:34] === 5min BTC 单笔交易  [DRY-RUN] ===
+[23:39:34] 入场过滤: 窗口TWAP波动<$25 且 冷门方ask<0.30（开窗后105-135s）｜止盈 +100%｜未止盈拿到结算
+[23:39:34] 喂价: Polymarket RTDS Chainlink TWAP-60s（结算同源）｜日志: data\logs\trade5m_20260910_233934.log
+[23:39:59] [窗口 1] 起点 1789054800（本地 23:39:59），开始持续监测 …
+[23:40:03] 市场: Bitcoin Up or Down - September 10, 11:35AM-11:40AM ET  (minSize=5)
+[23:40:04] t+    4s  TWAP=      n/a range=    n/a  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=无/10s WS事件=0(簿0/增量0) 距上次WS=从未] [TWAP#0 age=无]
+[23:40:06] t+    7s  TWAP=77249.784 range=  0.000  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=WS 簿龄=2.4s/10s WS事件=0(簿0/增量0) 距上次WS=从未] [TWAP#1 age=0s]
+[23:40:08] t+    9s  TWAP=77248.741 range=  1.043  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=WS 簿龄=1.8s/10s WS事件=2(簿2/增量0) 距上次WS=1.8s] [TWAP#3 age=1s]
+[23:40:10] t+   11s  TWAP=77247.733 range=  2.051  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=WS 簿龄=3.8s/10s WS事件=2(簿2/增量0) 距上次WS=3.8s] [TWAP#4 age=1s]
+[23:40:12] t+   13s  TWAP=77246.234 range=  3.550  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=WS 簿龄=5.8s/10s WS事件=2(簿2/增量0) 距上次WS=5.8s] [TWAP#7 age=0s]
+[23:40:14] t+   15s  TWAP=77244.853 range=  4.931  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=WS 簿龄=7.8s/10s WS事件=2(簿2/增量0) 距上次WS=7.8s] [TWAP#9 age=0s]
+[23:40:16] t+   17s  TWAP=77243.719 range=  6.065  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=WS 簿龄=9.8s/10s WS事件=2(簿2/增量0) 距上次WS=9.8s] [TWAP#11 age=0s]
+[23:40:21] t+   19s  TWAP=77241.309 range=  8.475  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=14.1s/10s WS事件=2(簿2/增量0) 距上次WS=14.1s] [TWAP#15 age=1s]
+[23:40:23] t+   23s  TWAP=77239.791 range=  9.993  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=16.7s/10s WS事件=2(簿2/增量0) 距上次WS=16.7s] [TWAP#17 age=1s]
+[23:40:27] t+   26s  TWAP=77236.540 range= 13.244  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=20.5s/10s WS事件=2(簿2/增量0) 距上次WS=20.5s] [TWAP#21 age=1s]
+[23:40:30] t+   30s  TWAP=77233.285 range= 16.499  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=23.8s/10s WS事件=2(簿2/增量0) 距上次WS=23.8s] [TWAP#25 age=0s]
+[23:40:33] t+   33s  TWAP=77231.674 range= 18.110  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=26.4s/10s WS事件=2(簿2/增量0) 距上次WS=26.4s] [TWAP#27 age=1s]
+[23:40:36] t+   35s  TWAP=77230.077 range= 19.707  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=29.0s/10s WS事件=2(簿2/增量0) 距上次WS=29.0s] [TWAP#29 age=2s]
+[23:40:39] t+   38s  TWAP=77227.013 range= 22.771  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=32.2s/10s WS事件=2(簿2/增量0) 距上次WS=32.2s] [TWAP#33 age=1s]
+[23:40:41] t+   41s  TWAP=77224.637 range= 25.147  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=34.8s/10s WS事件=2(簿2/增量0) 距上次WS=34.8s] [TWAP#36 age=0s]
+[23:40:44] t+   44s  TWAP=77222.226 range= 27.558  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=37.4s/10s WS事件=2(簿2/增量0) 距上次WS=37.4s] [TWAP#38 age=0s]
+[23:40:47] t+   47s  TWAP=77220.697 range= 29.087  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=40.1s/10s WS事件=2(簿2/增量0) 距上次WS=40.1s] [TWAP#40 age=1s]
+[23:40:49] t+   49s  TWAP=77218.093 range= 31.691  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=42.8s/10s WS事件=2(簿2/增量0) 距上次WS=42.8s] [TWAP#43 age=0s]
+[23:40:53] t+   52s  TWAP=77215.432 range= 34.352  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=46.0s/10s WS事件=2(簿2/增量0) 距上次WS=46.0s] [TWAP#46 age=0s]
+[23:40:55] t+   55s  TWAP=77213.648 range= 36.136  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=48.6s/10s WS事件=2(簿2/增量0) 距上次WS=48.6s] [TWAP#48 age=1s]
+[23:40:58] t+   58s  TWAP=77211.664 range= 38.120  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=51.3s/10s WS事件=2(簿2/增量0) 距上次WS=51.3s] [TWAP#50 age=1s]
+[23:41:01] t+   60s  TWAP=77208.642 range= 41.142  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=54.2s/10s WS事件=2(簿2/增量0) 距上次WS=54.2s] [TWAP#53 age=1s]
+[23:41:05] t+   63s  TWAP=77203.563 range= 46.221  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=58.6s/10s WS事件=2(簿2/增量0) 距上次WS=58.6s] [TWAP#57 age=0s]
+[23:41:09] t+   68s  TWAP=77200.478 range= 49.306  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=61.9s/10s WS事件=2(簿2/增量0) 距上次WS=61.9s] [TWAP#60 age=1s]
+[23:41:11] t+   71s  TWAP=77197.309 range= 52.475  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=64.5s/10s WS事件=2(簿2/增量0) 距上次WS=64.5s] [TWAP#63 age=1s]
+[23:41:14] t+   74s  TWAP=77195.644 range= 54.140  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=67.2s/10s WS事件=2(簿2/增量0) 距上次WS=67.2s] [TWAP#66 age=1s]
+[23:41:17] t+   76s  TWAP=77194.276 range= 55.508  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=70.0s/10s WS事件=2(簿2/增量0) 距上次WS=70.0s] [TWAP#69 age=0s]
+[23:41:19] t+   79s  TWAP=77193.452 range= 56.332  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=72.7s/10s WS事件=2(簿2/增量0) 距上次WS=72.7s] [TWAP#71 age=1s]
+[23:41:22] t+   82s  TWAP=77191.306 range= 58.478  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=75.4s/10s WS事件=2(簿2/增量0) 距上次WS=75.5s] [TWAP#75 age=0s]
+[23:41:26] t+   85s  TWAP=77189.675 range= 60.109  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=0.3s/10s WS事件=5(簿4/增量0) 距上次WS=0.3s] [TWAP#78 age=0s]
+[23:41:28] t+   89s  TWAP=77188.639 range= 61.145  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=WS 簿龄=0.6s/10s WS事件=8(簿6/增量0) 距上次WS=0.5s] [TWAP#80 age=1s]
+[23:41:30] t+   91s  TWAP=77187.106 range= 62.678  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=WS 簿龄=2.6s/10s WS事件=8(簿6/增量0) 距上次WS=2.6s] [TWAP#83 age=0s]
+[23:41:32] t+   93s  TWAP=77186.066 range= 63.718  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=WS 簿龄=4.6s/10s WS事件=8(簿6/增量0) 距上次WS=4.6s] [TWAP#84 age=1s]
+[23:41:34] t+   95s  TWAP=77185.108 range= 64.677  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=WS 簿龄=6.6s/10s WS事件=8(簿6/增量0) 距上次WS=6.6s] [TWAP#87 age=0s]
+[23:41:36] t+   97s  TWAP=77184.649 range= 65.135  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=WS 簿龄=8.6s/10s WS事件=8(簿6/增量0) 距上次WS=8.6s] [TWAP#88 age=1s]
+[23:41:40] t+   99s  TWAP=77182.439 range= 67.345  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=12.8s/10s WS事件=8(簿6/增量0) 距上次WS=12.8s] [TWAP#92 age=0s]
+[23:41:43] t+  103s  TWAP=77182.043 range= 67.741  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=15.5s/10s WS事件=8(簿6/增量0) 距上次WS=15.5s] [TWAP#95 age=1s]
+[23:41:46] t+  106s  TWAP=77181.441 range= 68.343  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=18.2s/10s WS事件=8(簿6/增量0) 距上次WS=18.2s] [TWAP#97 age=1s]
+[23:41:46] [入场检查] ❌ 波动 $68.34 ≥ $25，放弃。
+[23:41:48] t+  108s  TWAP=77181.125 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=20.9s/10s WS事件=8(簿6/增量0) 距上次WS=20.9s] [TWAP#100 age=0s]
+[23:41:51] t+  111s  TWAP=77181.479 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=23.5s/10s WS事件=8(簿6/增量0) 距上次WS=23.5s] [TWAP#102 age=1s]
+[23:41:54] t+  113s  TWAP=77182.503 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=26.9s/10s WS事件=8(簿6/增量0) 距上次WS=26.9s] [TWAP#106 age=0s]
+[23:41:57] t+  117s  TWAP=77183.185 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=29.5s/10s WS事件=8(簿6/增量0) 距上次WS=29.5s] [TWAP#108 age=1s]
+[23:42:00] t+  120s  TWAP=77184.246 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=32.2s/10s WS事件=8(簿6/增量0) 距上次WS=32.2s] [TWAP#111 age=0s]
+[23:42:02] t+  122s  TWAP=77185.026 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=34.9s/10s WS事件=8(簿6/增量0) 距上次WS=34.9s] [TWAP#114 age=0s]
+[23:42:06] t+  125s  TWAP=77185.389 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=38.7s/10s WS事件=8(簿6/增量0) 距上次WS=38.7s] [TWAP#118 age=0s]
+[23:42:09] t+  129s  TWAP=77185.468 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=41.3s/10s WS事件=8(簿6/增量0) 距上次WS=41.3s] [TWAP#120 age=1s]
+[23:42:12] t+  131s  TWAP=77185.476 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=44.2s/10s WS事件=8(簿6/增量0) 距上次WS=44.2s] [TWAP#122 age=1s]
+[23:42:14] t+  134s  TWAP=77185.340 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=46.8s/10s WS事件=8(簿6/增量0) 距上次WS=46.8s] [TWAP#125 age=0s]
+[23:42:17] t+  137s  TWAP=77185.026 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=49.5s/10s WS事件=8(簿6/增量0) 距上次WS=49.5s] [TWAP#127 age=1s]
+[23:42:20] t+  139s  TWAP=77184.656 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=53.0s/10s WS事件=8(簿6/增量0) 距上次WS=53.0s] [TWAP#131 age=0s]
+[23:42:23] t+  143s  TWAP=77184.854 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=55.9s/10s WS事件=8(簿6/增量0) 距上次WS=55.9s] [TWAP#133 age=1s]
+[23:42:26] t+  146s  TWAP=77185.290 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=58.5s/10s WS事件=8(簿6/增量0) 距上次WS=58.5s] [TWAP#136 age=0s]
+[23:42:29] t+  149s  TWAP=77185.435 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=61.1s/10s WS事件=8(簿6/增量0) 距上次WS=61.1s] [TWAP#138 age=1s]
+[23:42:31] t+  151s  TWAP=77185.675 range= 68.659  Up  0.999/   n/a  Down    n/a/ 0.001  [盘口=REST 簿龄=63.9s/10s WS事件=8(簿6/增量0) 距上次WS=63.9s] [TWAP#141 age=0s]
+[23:42:39] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:42:46] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:42:53] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:43:00] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:43:08] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:43:16] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:43:23] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:43:30] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:43:38] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:43:47] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:43:55] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:44:02] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:44:09] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:44:16] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:44:23] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:44:31] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:44:38] [盘口] 拉取失败，下轮重试：Client error '404 Not Found' for url 'https://clob.polymarket.com/book?token_id=
+[23:44:40] 本窗口未入场，进入下一个窗口（1/1）。
+[23:44:40] 1 个窗口均未满足入场条件，未交易。

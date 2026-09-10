@@ -5,7 +5,7 @@
 
 文件布局::
 
-    data/ticks/2026-09-08_market.jsonl
+    runtime/ticks/2026-09-08_market.jsonl
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ log = get_logger(__name__)
 
 
 class TickRecorder:
-    def __init__(self, out_dir: str | Path = "data/ticks"):
+    def __init__(self, out_dir: str | Path = "runtime/ticks"):
         self._dir = Path(out_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._fh = None

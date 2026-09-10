@@ -21,12 +21,12 @@ cp .env.example .env
 uv run pytest -q
 ```
 
-5min 加密单笔交易实盘（`pm_arb.app.trade5m`）运行时会把行情轨迹与决策写入
-`data/logs/trade5m_<时间戳>.log`，可实时跟踪：
+5min 加密多笔交易实盘（`pm_arb.app.trade5m`）运行时会把行情轨迹与决策写入
+`runtime/logs/trade5m_<时间戳>.log`，可实时跟踪：
 
 ```bash
 # 实时查看最新一次会话日志
-tail -f "$(ls -t data/logs/trade5m_*.log | head -1)"
+tail -f "$(ls -t runtime/logs/trade5m_*.log | head -1)"
 # 停止正在运行的实例
 pkill -f "pm_arb.app.trade5m"
 ```

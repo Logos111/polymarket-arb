@@ -1,4 +1,4 @@
-"""BTC/ETH 5 分钟 Up/Down 单笔方向性交易（小额真实资金）。
+"""BTC/ETH 5 分钟 Up/Down 多笔方向性交易（小额真实资金）。
 
 策略（用户指定规则，方向性投机，非套利）：
 1. 对齐到下一个干净窗口起点，从 t=0 开始持续监测；
@@ -16,14 +16,14 @@
 5. 止盈：best_bid >= 0.65 时卖出（固定止盈价，与入场价无关）；
 6. 未止盈则拿到结算：对每份赎 $1，错归 $0。
 
-不满足入场条件则等下一个窗口重试（--windows 上限，默认 3）；累计成交笔数达到
---fills（默认 1）后停止。
+不满足入场条件则等下一个窗口重试（--windows 上限，默认 20）；累计成交笔数达到
+--fills（默认 3）后停止，成交后不退出而是继续监测下一个窗口。
 
 可视化：
 - 交互式终端（TTY）：清屏实时仪表盘，每轮询（2s）刷新，含盘口、喂价、
   过滤状态、入场/止盈判定与持仓浮盈，底部滚动最近决策事件；
 - 非 TTY（后台/管道）：滚动打印同样信息；
-- 始终追加写入 ``data/logs/trade5m_<ts>.log``，可 ``tail -f`` 实时查看。
+- 始终追加写入 ``runtime/logs/trade5m_<ts>.log``，可 ``tail -f`` 实时查看。
 
 用法::
 
@@ -67,7 +67,7 @@ POLL = 2.0                           # 监测轮询间隔
 WS_FRESH_SEC = 10.0                  # WS 本地簿新鲜度阈值：超龄则判定陈旧回退 REST
 FEED_FRESH_SEC = 15.0                # RTDS TWAP 新鲜度阈值：超龄判定喂价不可信
 END_MARGIN = 60                      # 结算前 N 秒停止操作
-LOG_DIR = os.path.join("data", "logs")
+LOG_DIR = os.path.join("runtime", "logs")
 
 
 def _fmt(d: Decimal | None, w: int = 6) -> str:
@@ -101,8 +101,9 @@ class SessionLog:
 def _render_tui(st: dict, sl: SessionLog) -> None:
     """清屏刷新实时仪表盘。"""
     L: list[str] = ["\033[2J\033[H" + "=" * 74]
+    fd, mf = st["fills_done"], st["max_fills"]
     hdr = (f" 5min {st['symbol'].upper()}  {st['mode']:<16} "
-           f"窗口 {st['attempt']}/{st['max_windows']}")
+           f"窗口 {st['attempt']}/{st['max_windows']}  累计成交 {fd}/{mf}")
     L.append(hdr + f"   t+{st['elapsed']:>5.0f}s  剩余 {st['remain']:>3.0f}s")
     L.append("-" * 74)
     rng = st["btc_range"]
@@ -227,7 +228,7 @@ async def wait_next_window_start() -> int:
 
 
 async def try_window(
-    symbol: str, dry: bool, max_windows: int, now: bool = False, max_fills: int = 1
+    symbol: str, dry: bool, max_windows: int, now: bool = False, max_fills: int = 3
 ) -> int:
     s = get_settings()
     if not s.has_private_key:
@@ -237,7 +238,8 @@ async def try_window(
     tui = sys.stdout.isatty()
     sl = SessionLog(tui)
     mode = "[DRY-RUN]" if dry else "[LIVE 真实资金]"
-    sl.line(f"=== 5min {symbol.upper()} 单笔交易  {mode} ===", event=True)
+    sl.line(f"=== 5min {symbol.upper()} 多笔交易  {mode} ===", event=True)
+    sl.line(f"计划: 最多 {max_windows} 个窗口，累计成交 {max_fills} 笔后停止", event=True)
     sl.line(f"入场过滤: 窗口TWAP波动<${MAX_VOL} 且 冷门方ask∈({MIN_ENTRY},{MAX_ENTRY})"
             f"（开窗后{ENTRY_AFTER}-{ENTRY_UNTIL}s）｜止盈价 {TAKE_PROFIT_PRICE}｜未止盈拿到结算")
     sl.line(f"喂价: Polymarket RTDS Chainlink TWAP-60s（结算同源）｜日志: {sl.path}")
@@ -310,7 +312,9 @@ async def try_window(
 
         st = {
             "symbol": symbol, "mode": mode, "attempt": attempt,
-            "max_windows": max_windows, "elapsed": 0.0, "remain": 300.0,
+            "max_windows": max_windows,
+            "fills_done": fills_done, "max_fills": max_fills,  # 跨窗口累计战况
+            "elapsed": 0.0, "remain": 300.0,
             "btc_last": None, "btc_high": None, "btc_low": None, "btc_range": None,
             "book": {"Up": {}, "Down": {}}, "underdog": "-", "ud_ask": None, "ud_ask_sz": None,
             "entry_status": "等待中", "pos_side": None, "pos_entry": None,
@@ -550,12 +554,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="5min 加密单笔交易（冷门方 +100% 止盈）")
     parser.add_argument("--symbol", default="btc", choices=["btc", "eth"])
     parser.add_argument("--dry-run", action="store_true", help="不真实下单，只模拟观察")
-    parser.add_argument("--windows", type=int, default=3, help="最多尝试的窗口数（默认 3）")
-    parser.add_argument("--fills", type=int, default=1,
-                        help="目标成交笔数：累计达到后停止（默认 1）")
+    parser.add_argument("--windows", type=int, default=20, help="最多尝试的窗口数（默认 20）")
+    parser.add_argument("--fills", type=int, default=3,
+                        help="目标成交笔数：累计达到后停止（默认 3）")
     parser.add_argument("--now", action="store_true",
                         help="调试：不等待窗口起点，直接监测当前进行中窗口")
     args = parser.parse_args()
+    if args.windows < 1 or args.fills < 1:
+        parser.error("--windows 和 --fills 必须为正整数")
 
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):

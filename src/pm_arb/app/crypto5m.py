@@ -5,7 +5,7 @@
     uv run pm-crypto5m                       # 快照：btc/eth 当前窗口 Up/Down 盘口
     uv run pm-crypto5m --symbols btc eth --levels 5
     uv run pm-crypto5m --watch 60            # 订阅 WS，实时刷新 60 秒
-    uv run pm-crypto5m --record              # 同时录制 tick 到 data/ticks/
+    uv run pm-crypto5m --record              # 同时录制 tick 到 runtime/ticks/
 
 输出每个币种当前 5 分钟窗口的 Up（上涨）/ Down（下跌）token 最优买卖价、
 价差、中间价与前 N 档深度，并打印 Up+Down 中间价之和（理论上 ≈ 1）。
@@ -170,7 +170,7 @@ def main() -> int:
     )
     parser.add_argument("--levels", type=int, default=3, help="显示盘口档位（默认 3）")
     parser.add_argument("--watch", type=int, default=0, metavar="SECONDS", help="实时订阅秒数")
-    parser.add_argument("--record", action="store_true", help="同时录制 tick 到 data/ticks/")
+    parser.add_argument("--record", action="store_true", help="同时录制 tick 到 runtime/ticks/")
     args = parser.parse_args()
 
     # Windows 控制台默认 GBK，统一 UTF-8 输出，避免中文/emoji 编码报错
