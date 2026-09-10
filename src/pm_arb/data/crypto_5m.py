@@ -4,8 +4,16 @@ Polymarket 的 5 分钟加密预测市场（Chainlink 结算）命名规律稳�
 
     slug = "{sym}-updown-5m-{window_start_unix}"
 
-其中 ``window_start_unix`` 为 5 分钟整点对齐的窗口开始时刻（UTC 秒）。
-因此无需翻页搜索，直接按当前时间构造 slug → Gamma 查询即可拿到
+其中 ``window_start_unix`` 为 5 分钟整点对齐的窗口开始时刻（UTC 秒）；
+实测（2026-09-10）：slug btc-updown-5m-1789055700 的市场标题为
+"…11:55AM-12:00PM ET"，即标题区间与 slug 时间戳对齐。
+
+**边界竞态警示**：取"即将开始"的窗口市场时必须显式传 ``window_start``，
+不能用默认的 ``current_window_start()``——窗口边界前 1~2 秒它仍指向
+上一个（即将结算的）窗口，恰好会拿到已死的市场（历史事故：trade5m
+曾在边界前 1s 取市场，整窗监测了已结算盘口）。
+
+因此无需翻页搜索，直接按窗口起点构造 slug → Gamma 查询即可拿到
 token ID（Outcome 固定为 ["Up", "Down"]）。
 
 已观察到的 sym：btc / eth / sol / xrp / doge / bnb / hype / zec 等。
@@ -43,6 +51,7 @@ def current_window_start(now: float | None = None) -> int:
 
 
 def window_slug(symbol: str, window_start: int) -> str:
+    """返回**开始于** window_start 的窗口对应市场的 slug（slug 时间戳=窗口开始）。"""
     sym = symbol.lower()
     if sym not in SYMBOLS:
         raise ValueError(f"不支持的币种 {symbol}；可选：{sorted(SYMBOLS)}")
@@ -54,6 +63,7 @@ async def get_window_market(
 ) -> Market | None:
     """获取某币种某 5 分钟窗口的市场（默认当前窗口）。
 
+    取"即将开始"的窗口务必显式传 ``window_start``（边界竞态见模块 docstring）。
     窗口刚开始/结束瞬间市场可能尚未创建或已关闭，返回 None。
     """
     sym = symbol.lower()

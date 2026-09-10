@@ -152,6 +152,82 @@ class ClobTrader:
             log.warning("order_rejected", client_id=order.client_id, resp=resp)
         return order
 
+    async def place_market(
+        self,
+        token_id: str,
+        side: Side,
+        amount: Decimal,
+        *,
+        order_type: OrderType = OrderType.FAK,
+        neg_risk: bool = False,
+    ) -> Order:
+        """下市价单（价格由 SDK 按当前盘口自动计算）。
+
+        - BUY：amount 为美元金额；SELL：amount 为份额数；
+        - 默认 FAK：能成交多少算多少，剩余取消——比 FOK 更贴近“市价成交”
+          语义，不会被往返延迟内的价格上移整单杀掉；
+        - Order.price/size 初始为 0，成交后按回执换算实际份数与均价。
+        """
+        from py_clob_client_v2.clob_types import MarketOrderArgs, PartialCreateOrderOptions
+        from py_clob_client_v2.clob_types import OrderType as PyOrderType
+
+        order = Order(
+            token_id=token_id,
+            side=side,
+            order_type=order_type,
+            price=Decimal(0),
+            size=Decimal(0),
+        )
+
+        def _do() -> dict:
+            args = MarketOrderArgs(
+                token_id=token_id,
+                amount=float(amount),
+                side=side.value,
+            )
+            options = PartialCreateOrderOptions(neg_risk=neg_risk)
+            py_type = getattr(PyOrderType, order_type.value)
+            return self._client.create_and_post_market_order(args, options, py_type)
+
+        try:
+            resp = await asyncio.to_thread(_do)
+        except Exception as e:
+            order.mark_failed(f"{type(e).__name__}: {e}")
+            log.warning("place_order_failed", client_id=order.client_id, error=str(e)[:150])
+            return order
+
+        if resp.get("success"):
+            order.mark_submitted(str(resp.get("orderID") or ""))
+            log.info(
+                "order_submitted",
+                client_id=order.client_id,
+                exchange_id=order.exchange_id,
+                side=side.value,
+                amount=str(amount),
+                type=f"MARKET/{order_type.value}",
+            )
+            # 回执 status=matched 表示已（部分）成交：换算实际份数与均价。
+            # 实测（2026-09-11 首笔市价成交）：making/taking 直接是十进制字符串
+            # （如 BUY：making="2.000000" USDC、taking="7.142858" 份），
+            # 不是 6 位定点整数——曾多除 1e6 导致仓位显示缩小百万倍。
+            # 均价 = 花费/份数（比值天然消除单位）。
+            if str(resp.get("status") or "").lower() == "matched":
+                try:
+                    making = Decimal(str(resp.get("makingAmount") or 0))
+                    taking = Decimal(str(resp.get("takingAmount") or 0))
+                    shares, notional = (
+                        (taking, making) if side is Side.BUY else (making, taking)
+                    )
+                    if shares > 0 and notional > 0:
+                        order.apply_fill(shares, notional / shares)
+                except (ArithmeticError, ValueError) as e:
+                    log.warning("market_fill_parse_failed",
+                                client_id=order.client_id, error=str(e)[:100])
+        else:
+            order.mark_rejected(str(resp.get("errorMsg") or resp.get("error") or resp))
+            log.warning("order_rejected", client_id=order.client_id, resp=resp)
+        return order
+
     async def cancel(self, exchange_id: str) -> bool:
         from py_clob_client_v2.clob_types import OrderPayload
 

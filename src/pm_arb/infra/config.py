@@ -45,7 +45,9 @@ class Settings(BaseSettings):
     signature_type: int = 0
     # Proxy/Safe 模式下的资金地址
     funder_address: str = ""
-    polygon_rpc_url: str = Field(default="https://polygon-rpc.com", repr=False)
+    polygon_rpc_url: str = Field(
+        default="https://polygon-bor-rpc.publicnode.com", repr=False
+    )  # 实测 polygon-rpc.com 已 403（tenant disabled），默认用可用公共节点
     # NegRiskAdapter（Polygon），多结果市场转换用；以官方文档为准
     neg_risk_adapter: str = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
 

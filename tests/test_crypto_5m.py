@@ -16,6 +16,7 @@ def test_window_start_aligned_to_300():
 
 
 def test_window_slug_format():
+    # slug 时间戳 = 窗口开始时刻（实测：slug 1789055700 ↔ 标题 11:55AM-12:00PM ET）
     assert crypto_5m.window_slug("BTC", 1788835200) == "btc-updown-5m-1788835200"
     assert crypto_5m.window_slug("eth", 123) == "eth-updown-5m-123"
 

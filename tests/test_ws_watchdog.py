@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import contextlib
 
 from pm_arb.data import ws as ws_mod
 from pm_arb.data.ws import MarketWsClient
@@ -51,12 +52,22 @@ async def test_idle_watchdog_fires_on_silent_connection(monkeypatch):
         on_reconnected=lambda: reconnected.set(),
         on_disconnected=lambda: disconnected.set(),
     )
+
+    # stream() 是惰性异步生成器，必须用任务驱动迭代，回调才会随连接流程触发
+    async def _drive() -> None:
+        async for _ in gen:
+            pass
+
+    task = asyncio.create_task(_drive())
     try:
         # 首次连接成功 → on_reconnected 触发
         await asyncio.wait_for(reconnected.wait(), timeout=2.0)
         # recv 静默 → 看门狗应在 ~ws_idle_timeout 后触发 on_disconnected
         await asyncio.wait_for(disconnected.wait(), timeout=2.0)
     finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
         await gen.aclose()
 
     assert fake.subscriptions, "应在连接后发送订阅消息"

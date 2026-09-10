@@ -163,7 +163,7 @@ class MarketWsClient:
                     while True:
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=idle_timeout)
-                        except asyncio.TimeoutError:
+                        except TimeoutError:
                             log.warning("ws_idle_timeout", idle=idle_timeout,
                                         action="reconnect")
                             await _fire(on_disconnected)
