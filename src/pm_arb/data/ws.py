@@ -104,6 +104,15 @@ def parse_message(raw: str | bytes) -> list[WsEvent]:
     return events
 
 
+async def _fire(cb: Callable[[], Awaitable[None] | None] | None) -> None:
+    """调用可选回调，兼容同步/异步两种实现。"""
+    if cb is None:
+        return
+    res = cb()
+    if inspect.isawaitable(res):
+        await res
+
+
 class MarketWsClient:
     """market 通道连接。用法::
 
@@ -120,13 +129,17 @@ class MarketWsClient:
         asset_ids: list[str],
         *,
         on_reconnected: Callable[[], Awaitable[None] | None] | None = None,
+        on_disconnected: Callable[[], Awaitable[None] | None] | None = None,
     ) -> AsyncIterator[WsEvent]:
-        """订阅 asset_ids 并无限产出事件；连接断开自动重连。
+        """订阅 asset_ids 并无限产出事件；连接断开/静默失效自动重连。
 
         ``on_reconnected``：每次（重）连接成功后回调，feed 层借此重新拉
         REST 快照，防止重连间隙丢失增量。
+        ``on_disconnected``：断连或空闲看门狗超时后回调，feed 层借此把本地
+        簿置为未就绪，使上层立即回退 REST 而非硬扛冻结盘口。
         """
         attempt = 0
+        idle_timeout = self._settings.ws_idle_timeout
         while True:
             try:
                 connect_kwargs: dict = {
@@ -141,17 +154,25 @@ class MarketWsClient:
                     sub = {"assets_ids": asset_ids, "type": "market"}
                     await ws.send(json.dumps(sub))
                     log.info("ws_connected", url=self._url, assets=len(asset_ids))
-                    if on_reconnected is not None:
-                        res = on_reconnected()
-                        if inspect.isawaitable(res):
-                            await res
+                    await _fire(on_reconnected)
                     attempt = 0
 
-                    async for raw in ws:
+                    # 空闲看门狗：ping/pong 只证明链路层活着，不代表订阅通道还在
+                    # 推业务数据。用 wait_for(recv) 检测“连接在但长时间无消息”的
+                    # 静默失效，超时主动断开重连（重连会重拉 REST 快照刷新本地簿）。
+                    while True:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=idle_timeout)
+                        except asyncio.TimeoutError:
+                            log.warning("ws_idle_timeout", idle=idle_timeout,
+                                        action="reconnect")
+                            await _fire(on_disconnected)
+                            break
                         for event in parse_message(raw):
                             yield event
 
             except (ConnectionClosed, OSError, TimeoutError) as e:
+                await _fire(on_disconnected)
                 delay = _RECONNECT_DELAYS[min(attempt, len(_RECONNECT_DELAYS) - 1)]
                 attempt += 1
                 log.warning("ws_disconnected", error=str(e)[:120], reconnect_in=delay)
@@ -160,6 +181,7 @@ class MarketWsClient:
                 log.info("ws_stream_cancelled")
                 raise
             except Exception as e:  # 兜底：ImportError/SSL 等意外错误不应静默杀死流
+                await _fire(on_disconnected)
                 delay = _RECONNECT_DELAYS[min(attempt, len(_RECONNECT_DELAYS) - 1)]
                 attempt += 1
                 log.warning("ws_unexpected_error", error=f"{type(e).__name__}: {e}"[:160],

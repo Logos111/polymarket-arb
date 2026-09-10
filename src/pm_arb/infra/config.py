@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = False
     http_timeout: float = 10.0
+    # WS 空闲看门狗（秒）：连接在但该时长内无任何业务消息则判定订阅
+    # 静默失效，主动断开重连（ping/pong 只能证明链路层活着，不代表频道还在推）
+    ws_idle_timeout: float = 60.0
     # 本地代理（网络受限时使用，如 http://127.0.0.1:7890）；留空则直连
     proxy_url: str = Field(default="", repr=False)
 

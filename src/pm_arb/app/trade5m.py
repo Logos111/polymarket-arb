@@ -44,7 +44,7 @@ from pm_arb.data.clob_rest import ClobRestClient
 from pm_arb.data.crypto_5m import current_window_start, get_window_market, up_down_tokens
 from pm_arb.data.feed import MarketDataFeed
 from pm_arb.data.gamma import GammaClient
-from pm_arb.data.models import Market
+from pm_arb.data.models import Market, WsBookEvent, WsPriceChange
 from pm_arb.infra.config import Settings, get_settings
 from pm_arb.infra.logging import get_logger, setup_logging
 
@@ -57,6 +57,7 @@ TAKE_PROFIT_RATIO = Decimal("2.0")   # +100% 止盈
 MAX_ENTRY = Decimal("0.30")          # 冷门方入场价上限（30 点）
 MAX_VOL = Decimal("25")              # 本窗口 BTC 波动上限（USD）
 POLL = 2.0                           # 监测轮询间隔
+WS_FRESH_SEC = 10.0                  # WS 本地簿新鲜度阈值：超龄则判定陈旧回退 REST
 END_MARGIN = 20                      # 结算前 N 秒停止操作
 LOG_DIR = os.path.join("data", "logs")
 
@@ -105,10 +106,13 @@ def _render_tui(st: dict, sl: SessionLog) -> None:
     L.append("-" * 74)
     rng = st["btc_range"]
     vol_ok = rng is not None and rng < MAX_VOL
+    feed_age = st.get("feed_age", -1.0)
+    feed_age_s = f"{feed_age:.0f}s前更新" if feed_age >= 0 else "无"
     L.append(f" Chainlink BTC  last={_fmt(st['btc_last'], 11)}  high={_fmt(st['btc_high'], 11)}"
              f"  low={_fmt(st['btc_low'], 11)}")
     L.append(f" 窗口波动 range={_fmt(rng, 8)}  过滤(<${MAX_VOL}): "
-             f"{'✅ 通过' if vol_ok else '❌ 超限' if rng is not None else '… 采样中'}")
+             f"{'✅ 通过' if vol_ok else '❌ 超限' if rng is not None else '… 采样中'}"
+             f"   链上round={st.get('feed_round')} {feed_age_s}")
     L.append("-" * 74)
     L.append(f" {'side':<6}{'best_bid':>10}{'best_ask':>10}")
     for name in ("Up", "Down"):
@@ -119,6 +123,15 @@ def _render_tui(st: dict, sl: SessionLog) -> None:
     L.append(f" 冷门方={ud:<5} ask={_fmt(ua)}  过滤(<{MAX_ENTRY}): "
              f"{'✅' if ask_ok else '❌' if ua is not None else '…'}")
     L.append(f" 入场窗口[{ENTRY_AFTER},{ENTRY_UNTIL}s]: {st['entry_status']}")
+    ws_ago = st.get("ws_ago", -1.0)
+    ws_ago_s = f"{ws_ago:.1f}s前" if ws_ago >= 0 else "从未"
+    src = st.get("src", "-")
+    src_tag = "✅实时WS" if src == "WS" else "⚠️REST回退"
+    book_age = st.get("book_age", float("inf"))
+    book_age_s = f"{book_age:.1f}s" if book_age != float("inf") else "无"
+    L.append(f" 数据源: 盘口={src} {src_tag}  簿龄={book_age_s}/{WS_FRESH_SEC:.0f}s  "
+             f"WS事件={st.get('ws_events', 0)}"
+             f"(簿{st.get('ws_books', 0)}/增量{st.get('ws_changes', 0)})  距上次WS={ws_ago_s}")
     L.append("-" * 74)
     if st["pos_side"]:
         L.append(f" 持仓 {st['pos_side']} {st['pos_filled']} 份 @ {st['pos_entry']}"
@@ -147,6 +160,10 @@ class ChainlinkFeed:
         self.low: Decimal | None = None
         self.samples = 0
         self.errors = 0
+        # 链上喂价的 round 与 updatedAt：用于证明价格静止是 Chainlink 心跳
+        # 尚未翻新（真实结算源节奏），而非本地轮询卡住/读到陈旧值
+        self.round_id: int | None = None
+        self.updated_at: int | None = None
 
     @property
     def price_range(self) -> Decimal | None:
@@ -169,7 +186,10 @@ class ChainlinkFeed:
             if not res or len(res) < 258:
                 raise ValueError(f"bad rpc payload: {str(r.json())[:100]}")
             h = res[2:]
+            # latestRoundData 返回: roundId|answer|startedAt|updatedAt|answeredInRound
+            self.round_id = int(h[0:64], 16)
             price = Decimal(int(h[64:128], 16)) / Decimal(10**8)
+            self.updated_at = int(h[192:256], 16)
         except Exception as e:
             self.errors += 1
             if self.errors <= 3 or self.errors % 20 == 0:
@@ -206,12 +226,20 @@ async def books(rest: ClobRestClient, up: str, down: str) -> dict[str, dict]:
     return out
 
 
-def books_from_feed(feed: MarketDataFeed, up: str, down: str) -> dict[str, dict] | None:
-    """从 WS 维护的本地簿读实时最优价；未就绪返回 None（调用方回退 REST）。"""
+def books_from_feed(
+    feed: MarketDataFeed, up: str, down: str, max_age: float = WS_FRESH_SEC
+) -> dict[str, dict] | None:
+    """从 WS 维护的本地簿读实时最优价。
+
+    仅当两个簿都“就绪且新鲜”（距上次更新 < max_age 秒）才返回；否则返回
+    None，调用方回退 REST 快照。这是修复“ready 单向锁导致 REST 回退成死
+    代码”的关键：WS 静默/订阅失效但连接未断时，本地簿会冻结在旧值，必须
+    靠新鲜度而非 ready 判定来触发回退。
+    """
     out: dict[str, dict] = {}
     for name, tid in (("Up", up), ("Down", down)):
         ob = feed.books().get(tid)
-        if ob is None or not ob.ready:
+        if ob is None or not ob.is_fresh(max_age):
             return None
         bb, ba = ob.best_bid, ob.best_ask
         out[name] = {
@@ -320,29 +348,43 @@ async def try_window(symbol: str, dry: bool, max_windows: int, now: bool = False
             "entry_status": "等待中", "pos_side": None, "pos_entry": None,
             "pos_filled": Decimal(0), "pos_bid": None, "pos_pnl": Decimal(0),
             "tp_target": None,
+            # 数据源探针：盘口来自 WS 本地簿还是 REST 回退；WS 活跃度与新鲜度
+            "src": "-", "ws_events": 0, "ws_changes": 0, "ws_books": 0,
+            "ws_ago": -1.0, "feed_age": -1.0, "feed_round": None,
+            "book_age": float("inf"),
         }
 
         mfeed = MarketDataFeed([up, down])
         stop_feed = asyncio.Event()
+        # WS 活跃度统计：每收到一个真实 WS 事件就自增，证明盘口是实时增量流
+        # 而非 REST 快照回退（events 持续增长 => WS 在推；停滞 => 断流/回退）
+        ws_stats = {"events": 0, "books": 0, "changes": 0, "last_wall": 0.0}
 
-        async def _run_feed(mf: MarketDataFeed, stop: asyncio.Event) -> None:
+        async def _run_feed(mf: MarketDataFeed, stop: asyncio.Event, stats: dict) -> None:
             gen = mf.run()
             try:
-                async for _ in gen:
+                async for ev in gen:
+                    stats["events"] += 1
+                    stats["last_wall"] = time.time()
+                    if isinstance(ev, WsBookEvent):
+                        stats["books"] += 1
+                    elif isinstance(ev, WsPriceChange):
+                        stats["changes"] += 1
                     if stop.is_set():
                         break
             finally:
                 with contextlib.suppress(Exception):
                     await gen.aclose()
 
-        feed_task = asyncio.create_task(_run_feed(mfeed, stop_feed))
+        feed_task = asyncio.create_task(_run_feed(mfeed, stop_feed, ws_stats))
 
         async with ClobRestClient() as rest:
             while int(time.time()) < deadline:
                 elapsed = time.time() - ws
                 await feed.poll_once()
-                # 优先 WS 实时簿；未就绪/断流时回退 REST 快照
-                b = books_from_feed(mfeed, up, down)
+                # 优先 WS 实时簿；未就绪/陈旧/断流时回退 REST 快照
+                b = books_from_feed(mfeed, up, down, WS_FRESH_SEC)
+                src = "WS" if b is not None else "REST"
                 if b is None:
                     try:
                         b = await books(rest, up, down)
@@ -353,10 +395,19 @@ async def try_window(symbol: str, dry: bool, max_windows: int, now: bool = False
 
                 cand, ask = pick_underdog(b)
                 # ---- 刷新状态 ----
+                ws_ago = (time.time() - ws_stats["last_wall"]) if ws_stats["last_wall"] else -1.0
+                feed_age = (time.time() - feed.updated_at) if feed.updated_at else -1.0
+                # 本地簿龄：WS 静默时持续增大，超过 WS_FRESH_SEC 即触发上面的 REST 回退
+                up_ob, dn_ob = mfeed.books().get(up), mfeed.books().get(down)
+                book_age = max(up_ob.age() if up_ob else float("inf"),
+                               dn_ob.age() if dn_ob else float("inf"))
                 st.update(
                     elapsed=elapsed, remain=max(0.0, deadline - time.time()),
                     btc_last=feed.last, btc_high=feed.high, btc_low=feed.low,
                     btc_range=feed.price_range, book=b, underdog=cand, ud_ask=ask,
+                    src=src, ws_events=ws_stats["events"], ws_changes=ws_stats["changes"],
+                    ws_books=ws_stats["books"], ws_ago=ws_ago, feed_age=feed_age,
+                    feed_round=feed.round_id, book_age=book_age,
                 )
                 if entered and side_name:
                     st["pos_bid"] = b[side_name].get("best_bid")
@@ -366,13 +417,21 @@ async def try_window(symbol: str, dry: bool, max_windows: int, now: bool = False
                 # ---- 行情轨迹（写入日志，实时可 tail）----
                 ua, ub = b["Up"].get("best_ask"), b["Up"].get("best_bid")
                 da, db = b["Down"].get("best_ask"), b["Down"].get("best_bid")
+                # 数据源探针：盘口源 + 本地簿龄/阈值 + WS 事件计数 + 链上喂价 age
+                ws_ago_s = f"{ws_ago:.1f}s" if ws_ago >= 0 else "从未"
+                feed_age_s = f"{feed_age:.0f}s" if feed_age >= 0 else "无"
+                book_age_s = f"{book_age:.1f}s" if book_age != float("inf") else "无"
+                probe = (f"[盘口={src} 簿龄={book_age_s}/{WS_FRESH_SEC:.0f}s "
+                         f"WS事件={ws_stats['events']}"
+                         f"(簿{ws_stats['books']}/增量{ws_stats['changes']}) "
+                         f"距上次WS={ws_ago_s}] [链上round={feed.round_id} age={feed_age_s}]")
                 pos = ""
                 if entered:
                     pnl = (b[side_name].get("best_bid") or entry_price) - entry_price
                     pos = f"  [持仓 {side_name} @{entry_price} 浮动 {pnl:+.3f}]"
                 sl.line(f"t+{elapsed:>5.0f}s  BTC={_fmt(feed.last, 9)} "
                         f"range={_fmt(feed.price_range, 7)}  "
-                        f"Up {_fmt(ub)}/{_fmt(ua)}  Down {_fmt(db)}/{_fmt(da)}{pos}")
+                        f"Up {_fmt(ub)}/{_fmt(ua)}  Down {_fmt(db)}/{_fmt(da)}  {probe}{pos}")
 
                 # ---- 入场判定（开窗后 105–135s）。波动 high-low 单调不减，
                 #      一旦超限即永久拒绝；ask 可能回落，仅在价格变化时打印 ----

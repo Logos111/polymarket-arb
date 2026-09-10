@@ -102,7 +102,16 @@ class MarketDataFeed:
             # 重连后重拉快照；随后到达的 WS book 消息会再次覆盖
             await self._rest_snapshot_all()
 
-        stream = self._ws.stream(self.asset_ids, on_reconnected=_on_reconnect)
+        def _on_disconnect() -> None:
+            # 断连/看门狗超时：立即把本地簿置为未就绪，使上层马上回退 REST，
+            # 而不是硬扛一份可能已冻结的旧盘口（补救 ready 单向锁）
+            for ob in self._books.values():
+                ob.invalidate()
+            log.info("feed_books_invalidated", assets=len(self._books))
+
+        stream = self._ws.stream(
+            self.asset_ids, on_reconnected=_on_reconnect, on_disconnected=_on_disconnect
+        )
         try:
             async for event in stream:
                 if self._recorder is not None:
