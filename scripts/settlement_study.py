@@ -1,0 +1,195 @@
+"""结算规则实证研究（DEV_PLAN 阶段 0.1）。
+
+规则原文（Gamma 市场 description，已核实）：
+    "Up" = 窗口时间段内 Chainlink TWAP >= 该时间段开始时的价格，否则 "Down"。
+    结算源：Chainlink {SYM}/USD TWAP-60s 数据流。
+
+本脚本做两件事：
+1. 拉取最近 N 小时的已结算 5m 市场（Gamma，closed=true），取 outcomePrices 真实结果；
+2. 用 Binance 5m K 线（公共数据端点 data-api.binance.vision，作窗口价格路径代理）
+   验证候选规则的实证一致率：
+     R_close : close >= open                  （方向判定）
+     R_typ   : (H+L+C)/3 >= open              （典型价代理"窗口 TWAP"）
+     R_ohlc  : (O+H+L+C)/4 >= open
+   预期：一致率高（95%+），分歧集中在近平窗口（|close-open|/open 很小）。
+   Chainlink TWAP 与 Binance 现货存在交易所价差，分歧不视为异常。
+
+用法（在仓库根目录）::
+
+    PM_PROXY_URL=http://127.0.0.1:7890 uv run python scripts/settlement_study.py \
+        --symbols btc,eth --hours 24
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import time
+from dataclasses import dataclass
+
+import httpx
+
+GAMMA = "https://gamma-api.polymarket.com"
+BINANCE = "https://data-api.binance.vision"
+WINDOW = 300
+
+BINANCE_SYMBOL = {
+    "btc": "BTCUSDT",
+    "eth": "ETHUSDT",
+    "sol": "SOLUSDT",
+    "xrp": "XRPUSDT",
+}
+
+
+@dataclass
+class Sample:
+    symbol: str
+    window_start: int
+    up_won: bool  # Gamma 真实结算：True=Up 赢
+    # Binance K 线
+    o: float
+    h: float
+    low: float
+    c: float
+
+    # ---- 候选规则 ----
+    @property
+    def r_close(self) -> bool:
+        return self.c >= self.o
+
+    @property
+    def r_typ(self) -> bool:
+        return (self.h + self.low + self.c) / 3 >= self.o
+
+    @property
+    def r_ohlc(self) -> bool:
+        return (self.o + self.h + self.low + self.c) / 4 >= self.o
+
+    @property
+    def flatness(self) -> float:
+        """窗口平坦度：|close-open|/open，用于定位分歧样本。"""
+        return abs(self.c - self.o) / self.o
+
+
+async def fetch_settled(http: httpx.AsyncClient, symbol: str, ws: int) -> dict | None:
+    """Gamma 查已结算市场。注意：必须带 closed=true，否则默认查询不含已关闭市场。"""
+    r = await http.get(
+        f"{GAMMA}/markets",
+        params={"slug": f"{symbol}-updown-5m-{ws}", "closed": "true"},
+    )
+    data = r.json()
+    if not data:
+        return None
+    return data[0]
+
+
+async def fetch_kline(http: httpx.AsyncClient, symbol: str, ws: int) -> dict | None:
+    r = await http.get(
+        f"{BINANCE}/api/v3/klines",
+        params={"symbol": BINANCE_SYMBOL[symbol], "interval": "5m",
+                "startTime": ws * 1000, "limit": 1},
+    )
+    data = r.json()
+    return data[0] if data else None
+
+
+def outcome_from_market(m: dict) -> bool | None:
+    """outcomePrices ["1","0"] → Up 赢；["0","1"] → Down 赢；其他（未结算/异常）→ None。"""
+    prices = m.get("outcomePrices")
+    outcomes = m.get("outcomes")
+    if isinstance(prices, str):
+        prices = json.loads(prices)
+    if isinstance(outcomes, str):
+        outcomes = json.loads(outcomes)
+    if not prices or not outcomes:
+        return None
+    for out, p in zip(outcomes, prices, strict=False):
+        if out.lower() == "up":
+            return p == "1"
+    return None
+
+
+async def main() -> int:
+    parser = argparse.ArgumentParser(description="5m 市场结算规则实证")
+    parser.add_argument("--symbols", default="btc,eth", help="逗号分隔（默认 btc,eth）")
+    parser.add_argument("--hours", type=int, default=24, help="回溯小时数（默认 24）")
+    parser.add_argument("--delay", type=float, default=0.15, help="请求间隔秒（限流保护）")
+    parser.add_argument("--json-out", default="", help="样本落盘路径（可选）")
+    args = parser.parse_args()
+
+    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    proxy = os.environ.get("PM_PROXY_URL") or None
+    now = int(time.time())
+    last_settled = (now - 1800) // WINDOW * WINDOW  # 最近 30 分钟内可能未结算，跳过
+    first = last_settled - args.hours * 3600
+
+    samples: list[Sample] = []
+    skipped = {"no_market": 0, "unresolved": 0, "no_kline": 0}
+    async with httpx.AsyncClient(
+        timeout=15, proxy=proxy, follow_redirects=True,
+        headers={"User-Agent": "pm-arb-settlement-study/0.1"},
+    ) as http:
+        for sym in symbols:
+            ws = first
+            while ws <= last_settled:
+                m = await fetch_settled(http, sym, ws)
+                await asyncio.sleep(args.delay)
+                if m is None:
+                    skipped["no_market"] += 1
+                    ws += WINDOW
+                    continue
+                up_won = outcome_from_market(m)
+                if up_won is None:
+                    skipped["unresolved"] += 1
+                    ws += WINDOW
+                    continue
+                k = await fetch_kline(http, sym, ws)
+                await asyncio.sleep(args.delay)
+                if k is None:
+                    skipped["no_kline"] += 1
+                    ws += WINDOW
+                    continue
+                # Binance kline: [openTime, open, high, low, close, ...]
+                samples.append(Sample(sym, ws, up_won, float(k[1]), float(k[2]),
+                                      float(k[3]), float(k[4])))
+                ws += WINDOW
+
+    print(f"\n样本：{len(samples)} 个已结算窗口（{', '.join(symbols)}，近 {args.hours}h）")
+    print(f"跳过：{skipped}")
+
+    for name, attr in (("R_close  close>=open", "r_close"),
+                       ("R_typ    (H+L+C)/3>=open", "r_typ"),
+                       ("R_ohlc   (O+H+L+C)/4>=open", "r_ohlc")):
+        agree = sum(1 for s in samples if getattr(s, attr) == s.up_won)
+        rate = agree / len(samples) if samples else 0
+        print(f"  {name:<24} 一致 {agree}/{len(samples)}  = {rate:.1%}")
+
+    # 分歧样本剖析：按平坦度分桶看一致率
+    print("\n按窗口平坦度 |close-open|/open 分桶（R_close）：")
+    buckets = [("<0.02%", 0.0002), ("<0.05%", 0.0005), ("<0.1%", 0.001), ("<0.5%", 0.005), (">=0.5%", 1.0)]
+    lo = 0.0
+    for label, hi in buckets:
+        grp = [s for s in samples if lo <= s.flatness < hi]
+        if grp:
+            agree = sum(1 for s in grp if s.r_close == s.up_won)
+            print(f"  {label:<8} n={len(grp):<4} 一致率 {agree / len(grp):.1%}")
+        lo = hi
+
+    # 分歧明细（前 10 个）
+    disagree = [s for s in samples if s.r_close != s.up_won]
+    print(f"\nR_close 分歧样本 {len(disagree)} 个（前 10）：")
+    for s in disagree[:10]:
+        print(f"  {s.symbol} ws={s.window_start} up_won={s.up_won} "
+              f"O={s.o:.1f} C={s.c:.1f} ({(s.c - s.o) / s.o:+.4%})")
+
+    if args.json_out:
+        with open(args.json_out, "w", encoding="utf-8") as f:
+            json.dump([s.__dict__ for s in samples], f, ensure_ascii=False, indent=1)
+        print(f"\n样本已写入 {args.json_out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))
