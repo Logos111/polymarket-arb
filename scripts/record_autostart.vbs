@@ -1,3 +1,3 @@
-' pm-record 开机自启（可见控制台窗口：显性提示录制在跑，关窗即停）
-' Run 参数：1 = 正常显示窗口（任务栏可见、日志实时滚动）
-CreateObject("Wscript.Shell").Run """d:\kimi\polymarket\scripts\record_autostart.bat""", 1, False
+' pm-record 开机自启：pythonw 启动状态监视器（置顶小窗口，无控制台）
+' 监视器自动拉起录制进程；窗口即状态显示，也可手动启动/停止。
+CreateObject("Wscript.Shell").Run """d:\kimi\polymarket\.venv\Scripts\pythonw.exe"" ""d:\kimi\polymarket\scripts\record_monitor.py""", 1, False
