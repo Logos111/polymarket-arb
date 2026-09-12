@@ -82,8 +82,16 @@ class GammaClient:
                 break
             offset += page_size
 
-    async def get_market_by_slug(self, slug: str) -> Market | None:
-        data = await get_json(self._client, "/markets", params={"slug": slug})
+    async def get_market_by_slug(self, slug: str, *, closed: bool | None = None) -> Market | None:
+        """按 slug 查市场。
+
+        ``closed=True`` 才能查到已结算市场（不带该参数时 Gamma 默认
+        不含已关闭市场——阶段 0.1 实测教训，见 docs/settlement-rule.md）。
+        """
+        params: dict = {"slug": slug}
+        if closed is not None:
+            params["closed"] = str(closed).lower()
+        data = await get_json(self._client, "/markets", params=params)
         if not data:
             return None
         return Market.model_validate(data[0])

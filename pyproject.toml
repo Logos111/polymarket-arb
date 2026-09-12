@@ -22,6 +22,7 @@ pm-setup = "pm_arb.app.setup:main"
 pm-watch = "pm_arb.app.watch:main"
 pm-crypto5m = "pm_arb.app.crypto5m:main"
 pm-record = "pm_arb.app.record_ticks:main"
+pm-redeem = "pm_arb.app.redeem:main"
 
 [dependency-groups]
 dev = [

@@ -59,18 +59,20 @@ def window_slug(symbol: str, window_start: int) -> str:
 
 
 async def get_window_market(
-    gamma: GammaClient, symbol: str, window_start: int | None = None
+    gamma: GammaClient, symbol: str, window_start: int | None = None, *,
+    closed: bool | None = None,
 ) -> Market | None:
     """获取某币种某 5 分钟窗口的市场（默认当前窗口）。
 
     取"即将开始"的窗口务必显式传 ``window_start``（边界竞态见模块 docstring）。
     窗口刚开始/结束瞬间市场可能尚未创建或已关闭，返回 None。
+    ``closed=True`` 可查已结算市场（供 pm-redeem 回溯赎回）。
     """
     sym = symbol.lower()
     if sym not in SYMBOLS:
         raise ValueError(f"不支持的币种 {symbol}；可选：{sorted(SYMBOLS)}")
     ws = window_start if window_start is not None else current_window_start()
-    market = await gamma.get_market_by_slug(window_slug(sym, ws))
+    market = await gamma.get_market_by_slug(window_slug(sym, ws), closed=closed)
     if market is None:
         log.info("crypto5m_window_not_found", symbol=sym, window_start=ws)
         return None

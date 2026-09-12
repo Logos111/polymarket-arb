@@ -37,11 +37,13 @@ class Market(BaseModel):
     # Gamma 中这两个字段是 JSON 编码字符串：'["Yes","No"]' / '["id1","id2"]'
     outcomes: list[str] = Field(default_factory=list)
     clob_token_ids: list[str] = Field(default_factory=list, alias="clobTokenIds")
+    # 结算后为 '["1","0"]' / '["0","1"]'；未结算时接近中间价——仅在 closed 市场可信
+    outcome_prices: list[str] = Field(default_factory=list, alias="outcomePrices")
     volume: Decimal = Decimal(0)
     liquidity: Decimal = Field(default=Decimal(0), alias="liquidityNum")
     event_slug: str = ""
 
-    @field_validator("outcomes", "clob_token_ids", mode="before")
+    @field_validator("outcomes", "clob_token_ids", "outcome_prices", mode="before")
     @classmethod
     def _parse_json_list(cls, v):
         """Gamma 返回的是 JSON 字符串，自动解析为列表。"""

@@ -103,7 +103,9 @@ def _render_tui(st: dict, sl: SessionLog) -> None:
     L: list[str] = ["\033[2J\033[H" + "=" * 74]
     fd, mf = st["fills_done"], st["max_fills"]
     hdr = (f" 5min {st['symbol'].upper()}  {st['mode']:<16} "
-           f"窗口 {st['attempt']}/{st['max_windows']}  累计成交 {fd}/{mf}")
+           f"窗口 {st['attempt']}/{st['max_windows']}  累计成交 {fd}/{mf}"
+           f"  已止盈 ${Decimal(st['realized_pnl']):+.2f}"
+           f"｜待结算 ${Decimal(st['pending_cost']):.2f}({st['pending_count']}笔)")
     L.append(hdr + f"   t+{st['elapsed']:>5.0f}s  剩余 {st['remain']:>3.0f}s")
     L.append("-" * 74)
     rng = st["btc_range"]
@@ -251,7 +253,9 @@ async def try_window(
         trader = ClobTrader(s)  # 构造时派生 L2 creds
 
     fills_done = 0  # 累计成交笔数（达到 max_fills 停止）
-    realized_pnl = Decimal(0)  # 已止盈平仓的实现盈亏（持有到结算的仓位未计）
+    realized_pnl = Decimal(0)  # 已止盈平仓的实现盈亏
+    pending_cost = Decimal(0)  # 持有到结算仓位的成本（赎回前未计入 PnL）
+    pending_count = 0  # 待结算仓位笔数
 
     for attempt in range(1, max_windows + 1):
         ws = current_window_start() if now else await wait_next_window_start()
@@ -314,6 +318,8 @@ async def try_window(
             "symbol": symbol, "mode": mode, "attempt": attempt,
             "max_windows": max_windows,
             "fills_done": fills_done, "max_fills": max_fills,  # 跨窗口累计战况
+            "realized_pnl": str(realized_pnl), "pending_cost": str(pending_cost),
+            "pending_count": pending_count,
             "elapsed": 0.0, "remain": 300.0,
             "btc_last": None, "btc_high": None, "btc_low": None, "btc_range": None,
             "book": {"Up": {}, "Down": {}}, "underdog": "-", "ud_ask": None, "ud_ask_sz": None,
@@ -510,6 +516,7 @@ async def try_window(
                                 pnl = (o.avg_fill_price - entry_price) * o.filled_size
                                 sl.line(f"平仓 PnL ≈ ${pnl:+.2f}", event=True)
                                 realized_pnl += pnl
+                                st["realized_pnl"] = str(realized_pnl)
                                 tp_hit = True
                                 break
                             # 未成交则下轮继续尝试
@@ -531,24 +538,30 @@ async def try_window(
             if tp_hit:
                 sl.line(f"[成交 {fills_done}/{max_fills}] ✅ 已止盈平仓。", event=True)
             else:
+                pending_cost += entry_price * filled
+                pending_count += 1
+                st["pending_cost"] = str(pending_cost)
+                st["pending_count"] = pending_count
                 tail = "[DRY] " if dry else ""
                 sl.line(f"到点未止盈（TWAP={_fmt(rtds.last, 9)} "
                         f"range={_fmt(rtds.price_range, 7)}）。"
                         f"{tail}持有到结算：对赎 $1/份，错归 $0。", event=True)
             if fills_done >= max_fills:
                 sl.line(f"=== 目标达成：{max_fills} 笔成交（尝试 {attempt}/{max_windows} 窗口）。"
-                        f"已止盈实现 PnL 累计 ${realized_pnl:+.2f}"
-                        f"（持有到结算的仓位待链上赎回，未计入） ===", event=True)
+                        f"已止盈 PnL ${realized_pnl:+.2f}｜待结算 {pending_count} 笔 "
+                        f"${pending_cost:.2f}（对赎 $1/份，错归 $0） ===", event=True)
                 sl.close()
                 return 0
             sl.line(f"已成交 {fills_done}/{max_fills} 笔"
-                    f"（已止盈 PnL ${realized_pnl:+.2f}），进入下一个窗口"
+                    f"（已止盈 PnL ${realized_pnl:+.2f}｜待结算 {pending_count} 笔 "
+                    f"${pending_cost:.2f}），进入下一个窗口"
                     f"（{attempt}/{max_windows}）。", event=True)
         else:
             sl.line(f"本窗口未入场，进入下一个窗口（{attempt}/{max_windows}）。", event=True)
 
     sl.line(f"=== {max_windows} 个窗口尝试完毕：成交 {fills_done}/{max_fills} 笔，"
-            f"已止盈实现 PnL ${realized_pnl:+.2f} ===", event=True)
+            f"已止盈 PnL ${realized_pnl:+.2f}｜待结算 {pending_count} 笔 "
+            f"${pending_cost:.2f} ===", event=True)
     sl.close()
     return 0 if fills_done else 1
 

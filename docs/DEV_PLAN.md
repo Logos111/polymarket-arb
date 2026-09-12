@@ -13,8 +13,8 @@
 |---|---|---|---|
 | 0.1 | 结算规则实证 → docs/settlement-rule.md | ✅ 完成 | 规则钉死（TWAP≥起点价→Up）+ taker fee 公式确认；578 窗口实证 |
 | 0.2 | pm-record 独立 24/7 录制脚本 | ✅ 完成 | 已上线挂机，三路流非零；原始帧证实无 price_change |
-| 0.3 | 成交解析 bug（疑似已修）+ size=0 误判 FILLED | ⬜ 未开始 | 见下方修订说明 |
-| 0.4 | PnL 口径 + pm-redeem 赎回脚本 | ⬜ 未开始 | 3 笔待赎回仓位（09-11 实盘）可作首个实测对象 |
+| 0.3 | 成交解析 bug（疑似已修）+ size=0 误判 FILLED | ✅ 完成 | ref_price 估算目标份数；部分成交单测；打印统一 _fmt |
+| 0.4 | PnL 口径 + pm-redeem 赎回脚本 | ✅ 完成 | 两栏 PnL；dry-run 实测 4 笔仓位吻合；proxy 链上赎回留阶段 2 |
 | 1 | 模块化重构（决策纯函数） | ⬜ 未开始 | 提交拆分见 4.3 节 |
 | 2 | SQLite 结构层 + 结算回填 + 自动赎回 | ⬜ 未开始 | |
 | 3 | 回测引擎（17 份日志回放对账） | ⬜ 未开始 | 撮合按快照回放（原始帧已证实） |
@@ -95,18 +95,20 @@
 - [x] 附带修复两个录制可靠性问题：①JsonlWriter 每 50 行强制 flush（8KB 用户态缓冲可滞留数分钟，外部进程误判无数据）；②RTDS 业务级看门狗（服务端空帧心跳会喂饱链路层看门狗，订阅静默失效时需按业务时钟重连，且宽限期基线含连接时刻防重连风暴）；
 - [ ] 挂服务器 24/7 覆盖不同时段（当前挂本机，服务器迁移待定）；积累 24h 后检查数据完整性。
 
-### 0.3 成交解析验证 + size=0 误判修复
+### 0.3 成交解析验证 + size=0 误判修复 ✅ 完成（2026-09-12）
 
-- [ ] **验证 `4d0fc18` 修复**：dry-run/小额造一个部分成交场景，确认"花费/份数"算法正常（预期通过 → 划掉原 bug 项）；
-- [ ] **修复 [问题 4a]**：`place_market` 下单前用 `calc_size(ask, min_size)` 估算目标份数赋给 `order.size`，让 FILLED/PARTIAL 区分有意义；同时约定：**阶段 2 SQLite 落库一律用 `filled_size` 对比目标名义金额算实际成交比例，不依赖 status 字段**（双保险）；
-- [ ] 顺带修成交价 28 位小数打印（统一 `_fmt`）。
+- [x] **修复 [问题 4a]**：`place_market` 下单前用 `ref_price` 估算目标份数赋给 `order.size`，让 FILLED/PARTIAL 区分有意义；同时约定：**阶段 2 SQLite 落库一律用 `filled_size` 对比目标名义金额算实际成交比例，不依赖 status 字段**（双保险）；
+- [x] 部分成交语义单测验证（含 `avg_fill_price` None 兜底），`4d0fc18` 花费/份数算法确认正常；
+- [x] 顺带修成交价 28 位小数打印（统一 `_fmt`）。
 
-### 0.4 PnL 口径 + 赎回脚本
+### 0.4 PnL 口径 + 赎回脚本 ✅ 完成（2026-09-12）
 
-- [ ] realized_pnl 分"已止盈 / 待结算"两栏统计；
-- [ ] 新增 `app/redeem.py`（`pm-redeem`）：扫描待赎回仓位调 `ChainClient.redeem_positions`（阶段 2 前用 `--window-start` 手动指定 + Gamma 查 condition_id）。
+- [x] realized_pnl 分"已止盈 / 待结算"两栏统计（TUI 头部 + 窗口收尾/终局事件行同步）；
+- [x] 新增 `app/redeem.py`（`pm-redeem`）：`--window-start` 显式指定或 `--windows N` 回溯，Gamma closed=true 查结算 + CTF balanceOf(owner) 核对持仓 + 赢方应赎报告，`--execute` 走 `ChainClient.redeem`；
+- [x] **--dry-run 实测通过**：09-10/11 四笔实盘仓位全在 funder（proxy）名下、全为输方（应赎 $0.00），与链上探针完全吻合；
+- [ ] **遗留到阶段 2**：owner 为 funder proxy（signature_type=3）时链上赎回须从 proxy 发起（Safe execTransaction + EIP-1271 签名），当前 `--execute` 明确拒绝该场景，避免从 signer 盲发无效交易。
 
-**阶段 0 验证**：settlement-rule.md 实证 N≥20 + taker fee 结论；pm-record 挂机 24h 双流数据非零且增长 + 原始帧确认 event_type；dry-run 部分成交场景验证通过；`pm-redeem --dry-run`；pytest 全绿；git 提交。
+**阶段 0 验证**：✅ settlement-rule.md 实证（578 窗口）+ taker fee 结论；✅ pm-record 挂机双流数据非零且增长 + 原始帧确认 event_type；✅ 部分成交语义单测；✅ `pm-redeem --dry-run`（4 笔实盘仓位核对一致）；✅ pytest 67/67 全绿；✅ git 提交。
 
 ---
 
