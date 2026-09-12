@@ -35,6 +35,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 
@@ -189,7 +190,10 @@ async def main() -> int:
 
     # 分歧样本剖析：按平坦度分桶看一致率
     print("\n按窗口平坦度 |close-open|/open 分桶（R_close）：")
-    buckets = [("<0.02%", 0.0002), ("<0.05%", 0.0005), ("<0.1%", 0.001), ("<0.5%", 0.005), (">=0.5%", 1.0)]
+    buckets = [
+        ("<0.02%", 0.0002), ("<0.05%", 0.0005),
+        ("<0.1%", 0.001), ("<0.5%", 0.005), (">=0.5%", 1.0),
+    ]
     lo = 0.0
     for label, hi in buckets:
         grp = [s for s in samples if lo <= s.flatness < hi]
@@ -206,8 +210,8 @@ async def main() -> int:
               f"O={s.o:.1f} C={s.c:.1f} ({(s.c - s.o) / s.o:+.4%})")
 
     if args.json_out:
-        with open(args.json_out, "w", encoding="utf-8") as f:
-            json.dump([s.__dict__ for s in samples], f, ensure_ascii=False, indent=1)
+        payload = json.dumps([s.__dict__ for s in samples], ensure_ascii=False, indent=1)
+        await asyncio.to_thread(Path(args.json_out).write_text, payload, encoding="utf-8")
         print(f"\n样本已写入 {args.json_out}")
     return 0
 

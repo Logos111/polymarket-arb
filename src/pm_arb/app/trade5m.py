@@ -37,184 +37,36 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import math
-import os
 import sys
 import time
 from datetime import datetime
 from decimal import Decimal
 
+from pm_arb.app.tui5m import SessionLog
+from pm_arb.app.tui5m import render_tui as _render_tui
 from pm_arb.data.clob_rest import ClobRestClient
 from pm_arb.data.crypto_5m import current_window_start, get_window_market, up_down_tokens
 from pm_arb.data.feed import MarketDataFeed
 from pm_arb.data.gamma import GammaClient
 from pm_arb.data.models import Market, WsBookEvent, WsPriceChange
 from pm_arb.data.rtds import RtdsTwapFeed
-from pm_arb.infra.config import Settings, get_settings
+from pm_arb.infra.config import get_settings
 from pm_arb.infra.logging import get_logger, setup_logging
+from pm_arb.strategies.crypto_5m.context import WindowDataHub, fetch_raw_market
+from pm_arb.strategies.crypto_5m.decisions import (
+    EntryAction,
+    decide_entry,
+    decide_exit,
+    pick_underdog,
+)
+from pm_arb.strategies.crypto_5m.decisions import (
+    fmt_price as _fmt,
+)
+from pm_arb.strategies.crypto_5m.params import Crypto5mParams
 
 log = get_logger(__name__)
 
-TARGET_NOTIONAL = Decimal("2.00")   # 名义金额 $2
-ENTRY_AFTER = 70                     # 开窗后 70s（剩余 3:50）
-ENTRY_UNTIL = 135                    # 开窗后 135s（剩余 2:45）
-TAKE_PROFIT_PRICE = Decimal("0.65")  # 固定止盈价（与入场价无关）
-MAX_ENTRY = Decimal("0.30")          # 冷门方入场价上限（30 点）
-MIN_ENTRY = Decimal("0.15")          # 冷门方入场价下限：过冷说明市场已大致定局，
-                                      # 买入近乎拾彩票，不入场
-MAX_VOL = Decimal("30")              # 本窗口 TWAP 波动上限（USD）
-POLL = 2.0                           # 监测轮询间隔
-WS_FRESH_SEC = 10.0                  # WS 本地簿新鲜度阈值：超龄则判定陈旧回退 REST
-FEED_FRESH_SEC = 15.0                # RTDS TWAP 新鲜度阈值：超龄判定喂价不可信
-END_MARGIN = 60                      # 结算前 N 秒停止操作
-LOG_DIR = os.path.join("runtime", "logs")
-
-
-def _fmt(d: Decimal | None, w: int = 6) -> str:
-    return f"{d:.3f}".rjust(w) if d is not None else "n/a".rjust(w)
-
-
-class SessionLog:
-    """决策/行情日志：写文件 + （非 TTY 时）滚动打印 + （TTY 时）事件尾缓冲。"""
-
-    def __init__(self, tui: bool) -> None:
-        self.tui = tui
-        os.makedirs(LOG_DIR, exist_ok=True)
-        self.path = os.path.join(LOG_DIR, f"trade5m_{time.strftime('%Y%m%d_%H%M%S')}.log")
-        self._f = open(self.path, "a", encoding="utf-8")  # noqa: SIM115
-        self.events: list[str] = []
-
-    def line(self, msg: str, event: bool = False) -> None:
-        rec = f"[{time.strftime('%H:%M:%S')}] {msg}"
-        self._f.write(rec + "\n")
-        self._f.flush()
-        if event:
-            self.events.append(msg)
-            self.events = self.events[-10:]
-        if not self.tui:
-            print(msg, flush=True)
-
-    def close(self) -> None:
-        self._f.close()
-
-
-def _render_tui(st: dict, sl: SessionLog) -> None:
-    """清屏刷新实时仪表盘。"""
-    L: list[str] = ["\033[2J\033[H" + "=" * 74]
-    fd, mf = st["fills_done"], st["max_fills"]
-    hdr = (f" 5min {st['symbol'].upper()}  {st['mode']:<16} "
-           f"窗口 {st['attempt']}/{st['max_windows']}  累计成交 {fd}/{mf}"
-           f"  已止盈 ${Decimal(st['realized_pnl']):+.2f}"
-           f"｜待结算 ${Decimal(st['pending_cost']):.2f}({st['pending_count']}笔)")
-    L.append(hdr + f"   t+{st['elapsed']:>5.0f}s  剩余 {st['remain']:>3.0f}s")
-    L.append("-" * 74)
-    rng = st["btc_range"]
-    vol_ok = rng is not None and rng < MAX_VOL
-    feed_age = st.get("feed_age", -1.0)
-    feed_age_s = f"{feed_age:.0f}s前更新" if feed_age >= 0 else "无"
-    L.append(f" Chainlink TWAP  last={_fmt(st['btc_last'], 11)}  high={_fmt(st['btc_high'], 11)}"
-             f"  low={_fmt(st['btc_low'], 11)}")
-    L.append(f" 窗口波动 range={_fmt(rng, 8)}  过滤(<${MAX_VOL}): "
-             f"{'✅ 通过' if vol_ok else '❌ 超限' if rng is not None else '… 采样中'}"
-             f"   TWAP#{st.get('feed_seq')} {feed_age_s}")
-    L.append("-" * 74)
-    L.append(f" {'side':<6}{'best_bid':>10}{'best_ask':>10}")
-    for name in ("Up", "Down"):
-        bk = st["book"][name]
-        L.append(f" {name:<6}{_fmt(bk['best_bid'], 10)}{_fmt(bk['best_ask'], 10)}")
-    ud, ua, usz = st["underdog"], st["ud_ask"], st.get("ud_ask_sz")
-    ask_ok = ua is not None and MIN_ENTRY < ua < MAX_ENTRY
-    depth = f"×{usz:.0f}" if usz is not None else ""
-    L.append(f" 冷门方={ud:<5} ask={_fmt(ua)}{depth}  过滤({MIN_ENTRY}-{MAX_ENTRY}): "
-             f"{'✅' if ask_ok else '❌' if ua is not None else '…'}")
-    L.append(f" 入场窗口[{ENTRY_AFTER},{ENTRY_UNTIL}s]: {st['entry_status']}")
-    ws_ago = st.get("ws_ago", -1.0)
-    ws_ago_s = f"{ws_ago:.1f}s前" if ws_ago >= 0 else "从未"
-    src = st.get("src", "-")
-    src_tag = "✅实时WS" if src == "WS" else "⚠️REST回退"
-    book_age = st.get("book_age", float("inf"))
-    book_age_s = f"{book_age:.1f}s" if book_age != float("inf") else "无"
-    L.append(f" 数据源: 盘口={src} {src_tag}  簿龄={book_age_s}/{WS_FRESH_SEC:.0f}s  "
-             f"WS事件={st.get('ws_events', 0)}"
-             f"(簿{st.get('ws_books', 0)}/增量{st.get('ws_changes', 0)})  距上次WS={ws_ago_s}")
-    L.append("-" * 74)
-    if st["pos_side"]:
-        L.append(f" 持仓 {st['pos_side']} {st['pos_filled']} 份 @ {st['pos_entry']}"
-                 f"  现bid={_fmt(st['pos_bid'])}  浮盈 {st['pos_pnl']:+.3f}"
-                 f"  止盈线 {st['tp_target']}")
-    else:
-        L.append(" 持仓: 无")
-    L.append("=" * 74)
-    L.append(" 最近事件:")
-    for ev in sl.events[-6:]:
-        L.append(f"   · {ev[:70]}")
-    L.append("=" * 74)
-    L.append(f" Ctrl+C 退出  |  日志 {sl.path}")
-    print("\n".join(L), flush=True)
-
-
-async def fetch_raw_market(slug: str, s: Settings) -> dict | None:
-    import httpx
-
-    async with httpx.AsyncClient(timeout=s.http_timeout, proxy=s.proxy_url or None) as c:
-        r = await c.get(f"{s.gamma_api_url}/markets", params={"slug": slug})
-        r.raise_for_status()
-        j = r.json()
-        return j[0] if j else None
-
-
-async def books(rest: ClobRestClient, up: str, down: str) -> dict[str, dict]:
-    out: dict[str, dict] = {}
-    for name, tid in (("Up", up), ("Down", down)):
-        ob = await rest.get_book(tid)  # 上游返回 OrderBook（空盘口时 best_* 为 None）
-        bb, ba = ob.best_bid, ob.best_ask
-        out[name] = {
-            "best_bid": bb.price if bb else None,
-            "best_ask": ba.price if ba else None,
-            "bid_size": bb.size if bb else None,
-            "ask_size": ba.size if ba else None,
-        }
-    return out
-
-
-def books_from_feed(
-    feed: MarketDataFeed, up: str, down: str, max_age: float = WS_FRESH_SEC
-) -> dict[str, dict] | None:
-    """从 WS 维护的本地簿读实时最优价。
-
-    仅当两个簿都“就绪且新鲜”（距上次更新 < max_age 秒）才返回；否则返回
-    None，调用方回退 REST 快照。这是修复“ready 单向锁导致 REST 回退成死
-    代码”的关键：WS 静默/订阅失效但连接未断时，本地簿会冻结在旧值，必须
-    靠新鲜度而非 ready 判定来触发回退。
-    """
-    out: dict[str, dict] = {}
-    for name, tid in (("Up", up), ("Down", down)):
-        ob = feed.books().get(tid)
-        if ob is None or not ob.is_fresh(max_age):
-            return None
-        bb, ba = ob.best_bid, ob.best_ask
-        out[name] = {
-            "best_bid": bb.price if bb else None,
-            "best_ask": ba.price if ba else None,
-            "bid_size": bb.size if bb else None,
-            "ask_size": ba.size if ba else None,
-        }
-    return out
-
-
-def pick_underdog(b: dict[str, dict]) -> tuple[str, Decimal | None]:
-    """返回 (side_name, best_ask) —— 更便宜的一方。"""
-    up_ask = b["Up"].get("best_ask")
-    down_ask = b["Down"].get("best_ask")
-    if up_ask is None and down_ask is None:
-        return "Up", None
-    if down_ask is None or (up_ask is not None and up_ask <= down_ask):
-        return "Up", up_ask
-    return "Down", down_ask
-
-
-def calc_size(ask: Decimal, min_size: int) -> int:
-    return max(math.ceil(TARGET_NOTIONAL / ask), min_size)
+P = Crypto5mParams()  # 单一决策来源：实盘与回测共用同一份参数（commit C 接 CLI 覆盖）
 
 
 async def wait_next_window_start() -> int:
@@ -242,8 +94,9 @@ async def try_window(
     mode = "[DRY-RUN]" if dry else "[LIVE 真实资金]"
     sl.line(f"=== 5min {symbol.upper()} 多笔交易  {mode} ===", event=True)
     sl.line(f"计划: 最多 {max_windows} 个窗口，累计成交 {max_fills} 笔后停止", event=True)
-    sl.line(f"入场过滤: 窗口TWAP波动<${MAX_VOL} 且 冷门方ask∈({MIN_ENTRY},{MAX_ENTRY})"
-            f"（开窗后{ENTRY_AFTER}-{ENTRY_UNTIL}s）｜止盈价 {TAKE_PROFIT_PRICE}｜未止盈拿到结算")
+    sl.line(f"入场过滤: 窗口TWAP波动<${P.max_vol} 且 冷门方ask∈({P.min_entry},{P.max_entry})"
+            f"（开窗后{P.entry_after}-{P.entry_until}s）｜止盈价 {P.take_profit_price}"
+            f"｜未止盈拿到结算")
     sl.line(f"喂价: Polymarket RTDS Chainlink TWAP-60s（结算同源）｜日志: {sl.path}")
 
     trader = None
@@ -312,7 +165,7 @@ async def try_window(
         entry_price: Decimal | None = None
         filled = Decimal(0)
         tp_hit = False
-        deadline = ws + 300 - END_MARGIN
+        deadline = ws + 300 - P.end_margin
 
         st = {
             "symbol": symbol, "mode": mode, "attempt": attempt,
@@ -358,27 +211,23 @@ async def try_window(
         rtds_task = asyncio.create_task(rtds.run(stop_feed))
 
         async with ClobRestClient() as rest:
+            hub = WindowDataHub(mfeed, rtds, rest, up, down, ws_fresh_sec=P.ws_fresh_sec)
             while int(time.time()) < deadline:
                 elapsed = time.time() - ws
-                # 优先 WS 实时簿；未就绪/陈旧/断流时回退 REST 快照
-                b = books_from_feed(mfeed, up, down, WS_FRESH_SEC)
-                src = "WS" if b is not None else "REST"
-                if b is None:
-                    try:
-                        b = await books(rest, up, down)
-                    except Exception as e:
-                        sl.line(f"[盘口] 拉取失败，下轮重试：{str(e)[:80]}")
-                        await asyncio.sleep(POLL)
-                        continue
+                # 优先 WS 实时簿；未就绪/陈旧/断流时回退 REST 快照（见 hub docstring）
+                got = await hub.get_books()
+                if got is None:
+                    sl.line(f"[盘口] 拉取失败，下轮重试：{str(hub.last_error or '')[:80]}")
+                    await asyncio.sleep(P.poll)
+                    continue
+                b, src = got
 
                 cand, ask = pick_underdog(b)
                 # ---- 刷新状态 ----
                 ws_ago = (time.time() - ws_stats["last_wall"]) if ws_stats["last_wall"] else -1.0
                 feed_age = rtds.age() if rtds.last is not None else -1.0
-                # 本地簿龄：WS 静默时持续增大，超过 WS_FRESH_SEC 即触发上面的 REST 回退
-                up_ob, dn_ob = mfeed.books().get(up), mfeed.books().get(down)
-                book_age = max(up_ob.age() if up_ob else float("inf"),
-                               dn_ob.age() if dn_ob else float("inf"))
+                # 本地簿龄：WS 静默时持续增大，超过 ws_fresh_sec 即触发上面的 REST 回退
+                book_age = hub.book_age()
                 st.update(
                     elapsed=elapsed, remain=max(0.0, deadline - time.time()),
                     btc_last=rtds.last, btc_high=rtds.high, btc_low=rtds.low,
@@ -404,7 +253,7 @@ async def try_window(
                 ws_ago_s = f"{ws_ago:.1f}s" if ws_ago >= 0 else "从未"
                 feed_age_s = f"{feed_age:.0f}s" if feed_age >= 0 else "无"
                 book_age_s = f"{book_age:.1f}s" if book_age != float("inf") else "无"
-                probe = (f"[盘口={src} 簿龄={book_age_s}/{WS_FRESH_SEC:.0f}s "
+                probe = (f"[盘口={src} 簿龄={book_age_s}/{P.ws_fresh_sec:.0f}s "
                          f"WS事件={ws_stats['events']}"
                          f"(簿{ws_stats['books']}/增量{ws_stats['changes']}) "
                          f"距上次WS={ws_ago_s}] [TWAP#{rtds.seq} age={feed_age_s}]")
@@ -417,47 +266,32 @@ async def try_window(
                         f"Up {_fmt(ub)}/{_fmt(ua)}{us_s}  Down {_fmt(db)}/{_fmt(da)}{ds_s}  "
                         f"{probe}{pos}")
 
-                # ---- 入场判定（开窗后 70–135s）。波动 high-low 单调不减，
-                #      一旦超限即永久拒绝；ask 可能回落，仅在价格变化时打印 ----
-                if not entered and not entry_done and ENTRY_AFTER <= elapsed <= ENTRY_UNTIL:
+                # ---- 入场判定（唯一决策源：decisions.decide_entry）。波动
+                #      high-low 单调不减，一旦超限即永久拒绝；ask 可能回落，
+                #      仅在价格变化时打印 ----
+                if not entered and not entry_done and P.entry_after <= elapsed <= P.entry_until:
                     st["entry_status"] = "判定中"
                     rng = rtds.price_range
-                    if ask is None or rng is None:
-                        sl.line(f"[入场检查] 数据不全（ask={ask} range={rng}），放弃。",
-                                event=True)
-                        st["entry_status"] = "放弃(数据不全)"
+                    d = decide_entry(elapsed, cand, ask, (b[cand] or {}).get("ask_size"),
+                                     rng, P, min_size=min_size)
+                    if d.action is EntryAction.ABORT_DATA or d.action is EntryAction.ABORT_VOL:
+                        sl.line(d.log, event=True)
+                        st["entry_status"] = d.status
                         entry_done = True
-                    elif rng >= MAX_VOL:
-                        sl.line(f"[入场检查] ❌ 波动 ${rng:.2f} ≥ ${MAX_VOL}，放弃。",
-                                event=True)
-                        st["entry_status"] = f"放弃(波动${rng:.0f})"
-                        entry_done = True
-                    elif ask >= MAX_ENTRY:
-                        st["entry_status"] = f"观察(ask{ask}≥{MAX_ENTRY})"
+                    elif d.action is EntryAction.OBSERVE:
+                        st["entry_status"] = d.status
                         if ask != last_ask_reject:
-                            sl.line(f"[入场检查] … {cand} ask={_fmt(ask)} ≥ {MAX_ENTRY}，观察")
+                            sl.line(d.log)
                             last_ask_reject = ask
-                    elif ask <= MIN_ENTRY:
-                        # 过冷不入场：市场已大致定局，冷门方近乎彩票；
-                        # 只在价格变化时打印，ask 回升到区间内可重新判定
-                        st["entry_status"] = f"观察(ask{ask}≤{MIN_ENTRY}过冷)"
-                        if ask != last_ask_reject:
-                            sl.line(f"[入场检查] … {cand} ask={_fmt(ask)} ≤ {MIN_ENTRY}，过冷观察")
-                            last_ask_reject = ask
-                    else:
-                        size = calc_size(ask, min_size)
+                    else:  # ENTER
+                        size = d.size
                         token_id = up if cand == "Up" else down
-                        ask_sz = b[cand].get("ask_size")
-                        depth = f"（档深{ask_sz:.0f}份）" if ask_sz is not None else "（档深未知）"
-                        sl.line(f"[入场检查] ✅ {cand} ask={_fmt(ask)}{depth} 波动${rng:.2f}"
-                                f" → 市价买 ≈ ${TARGET_NOTIONAL:.2f}，"
-                                f"止盈 {_fmt(TAKE_PROFIT_PRICE)}",
-                                event=True)
+                        sl.line(d.log, event=True)
                         if trader is None:
                             entered, side_name, entry_price = True, cand, ask
                             filled = Decimal(size)
                             st.update(pos_side=cand, pos_entry=ask, pos_filled=filled,
-                                      tp_target=TAKE_PROFIT_PRICE)
+                                      tp_target=P.take_profit_price)
                             st["entry_status"] = f"已入场 {cand}"
                         else:
                             from pm_arb.execution.orders import Side
@@ -468,7 +302,7 @@ async def try_window(
                             # ref_price 用本地盘口 ask 估算目标份数，让
                             # FILLED/PARTIAL 状态区分有意义（问题 4a）
                             order = await trader.place_market(
-                                token_id, Side.BUY, TARGET_NOTIONAL, ref_price=ask
+                                token_id, Side.BUY, P.target_notional, ref_price=ask
                             )
                             sl.line(f"买单: {order.status.value} {order.error or ''}", event=True)
                             if order.filled_size > 0 and order.status.value in (
@@ -479,7 +313,7 @@ async def try_window(
                                 entry_price = order.avg_fill_price or ask
                                 filled = order.filled_size
                                 st.update(pos_side=cand, pos_entry=entry_price, pos_filled=filled,
-                                          tp_target=TAKE_PROFIT_PRICE)
+                                          tp_target=P.take_profit_price)
                                 st["entry_status"] = f"已成交 {cand}"
                                 sl.line(f"成交: {filled:.4f} 份 @ {entry_price:.4f}"
                                         f"（≈${entry_price * filled:.2f}）",
@@ -489,14 +323,14 @@ async def try_window(
                                 sl.line("市价单未成交，本窗口放弃。", event=True)
                                 entry_done = True
                 elif not entered and not entry_done:
-                    st["entry_status"] = (f"等待 t∈[{ENTRY_AFTER},{ENTRY_UNTIL}]"
-                                          if elapsed < ENTRY_AFTER else "已错过")
+                    st["entry_status"] = decide_entry(
+                        elapsed, cand, ask, None, rtds.price_range, P).status
 
-                # ---- 止盈判定 ----
+                # ---- 止盈判定（唯一决策源：decisions.decide_exit） ----
                 if entered and side_name is not None:
                     bb = b[side_name].get("best_bid")
-                    if bb is not None and bb >= TAKE_PROFIT_PRICE:
-                        sl.line(f"✅ 止盈: bid {bb} >= {TAKE_PROFIT_PRICE}",
+                    if decide_exit(bb, P):
+                        sl.line(f"✅ 止盈: bid {bb} >= {P.take_profit_price}",
                                 event=True)
                         token_id = up if side_name == "Up" else down
                         if trader is None:
@@ -522,8 +356,8 @@ async def try_window(
                             # 未成交则下轮继续尝试
 
                 if tui:
-                    _render_tui(st, sl)
-                await asyncio.sleep(POLL)
+                    _render_tui(st, sl, P)
+                await asyncio.sleep(P.poll)
 
         stop_feed.set()
         rtds_task.cancel()

@@ -38,6 +38,7 @@ from pm_arb.data.models import Market
 from pm_arb.data.recorder import JsonlWriter, TickRecorder
 from pm_arb.data.rtds import RtdsTwapFeed
 from pm_arb.infra.logging import get_logger
+from pm_arb.infra.procinfo import rss_mb
 
 log = get_logger(__name__)
 
@@ -76,7 +77,9 @@ async def record_until(feeds: list[MarketDataFeed], deadline: float) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def run(symbols: list[str], out_dir: str, raw_sample: int) -> int:
+async def run(
+    symbols: list[str], out_dir: str, raw_sample: int, mem_cap_mb: float = 512.0
+) -> int:
     market_rec = TickRecorder(out_dir)
     rtds_writers = {s: JsonlWriter(out_dir, f"rtds_{s}") for s in symbols}
     raw_ws = JsonlWriter(out_dir, "raw_ws")
@@ -159,6 +162,16 @@ async def run(symbols: list[str], out_dir: str, raw_sample: int) -> int:
                 for w in rtds_writers.values():
                     w.flush()
                 raw_ws.flush()
+                # 内存自监控：每窗口记录一次 RSS/峰值，超阈值告警。
+                # 泄漏早期是每小时几 MB 的爬升，只能靠趋势发现。
+                cur, peak = rss_mb()
+                extra = {"rss_mb": round(cur, 1), "peak_mb": round(peak, 1)}
+                if cur < 0:
+                    log.warning("record_mem_unavailable")
+                elif cur > mem_cap_mb:
+                    log.warning("record_mem_high", cap_mb=mem_cap_mb, **extra)
+                else:
+                    log.info("record_mem", **extra)
                 log.info("record_window_done", window_start=ws_start,
                          market_lines=market_rec.lines_written)
     finally:
@@ -181,6 +194,8 @@ def main() -> int:
     parser.add_argument("--out", default="runtime/ticks", help="落盘目录")
     parser.add_argument("--raw-sample", type=int, default=1,
                         help="原始 WS 帧抽样：每 N 帧录 1（默认 1=全录）")
+    parser.add_argument("--mem-cap-mb", type=float, default=512.0,
+                        help="RSS 告警阈值 MB（默认 512，超限每窗口告警）")
     args = parser.parse_args()
     if args.raw_sample < 1:
         parser.error("--raw-sample 必须 >= 1")
@@ -190,7 +205,7 @@ def main() -> int:
 
     # Ctrl-C：KeyboardInterrupt 穿透 asyncio.run，run() 的 finally 负责取消
     # 常驻 RTDS 任务并 flush/close 全部落盘文件（丢最多一个缓冲区行）
-    return asyncio.run(run(symbols, args.out, args.raw_sample))
+    return asyncio.run(run(symbols, args.out, args.raw_sample, args.mem_cap_mb))
 
 
 if __name__ == "__main__":
