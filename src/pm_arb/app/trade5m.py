@@ -25,8 +25,11 @@ from pm_arb.execution.clob_trader import ClobTrader
 from pm_arb.execution.paper_runner import PaperRunner
 from pm_arb.infra.config import get_settings
 from pm_arb.infra.logging import setup_logging
+from pm_arb.infra.store import Store
 from pm_arb.strategies.crypto_5m.orchestrator import WindowOrchestrator
 from pm_arb.strategies.crypto_5m.params import Crypto5mParams, parse_overrides
+
+DB_PATH = "runtime/trade5m.sqlite3"
 
 
 def main() -> int:
@@ -58,15 +61,21 @@ def main() -> int:
     p = Crypto5mParams().model_copy(update=parse_overrides(args.param))
     # dry-run 换 PaperBroker（commit B 唯一行为改进点）；live 构造时派生 L2 creds
     broker = PaperRunner() if args.dry_run else ClobBroker(ClobTrader(s))
+    # 阶段 2：SQLite 结构层（orders/windows/positions）——dry/live 共用一库，
+    # mode 列区分；live 库同时承担持仓持久化（kill 重启恢复）
+    store = Store(DB_PATH)
 
     orch = WindowOrchestrator(
         args.symbol, p, broker, SessionLog(sys.stdout.isatty()),
         dry=args.dry_run, max_windows=args.windows, max_fills=args.fills,
+        store=store,
     )
     try:
         return asyncio.run(orch.run(now=args.now))
     except KeyboardInterrupt:
         return 130
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

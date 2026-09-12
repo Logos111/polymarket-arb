@@ -30,9 +30,11 @@ from pm_arb.data.feed import MarketDataFeed
 from pm_arb.data.gamma import GammaClient
 from pm_arb.data.models import Market, WsBookEvent, WsPriceChange
 from pm_arb.data.rtds import RtdsTwapFeed
+from pm_arb.data.settlement import settle_key, taker_fee
 from pm_arb.execution.broker import Broker
-from pm_arb.execution.orders import Side
+from pm_arb.execution.orders import Order, Side
 from pm_arb.infra.config import get_settings
+from pm_arb.infra.store import Store
 from pm_arb.strategies.crypto_5m.context import WindowDataHub, fetch_raw_market
 from pm_arb.strategies.crypto_5m.decisions import (
     EntryAction,
@@ -61,6 +63,7 @@ class WindowOrchestrator:
         max_windows: int = 20,
         max_fills: int = 3,
         clock: Callable[[], float] = time.time,
+        store: Store | None = None,
     ) -> None:
         self.symbol = symbol
         self.p = p
@@ -70,6 +73,21 @@ class WindowOrchestrator:
         self.max_windows = max_windows
         self.max_fills = max_fills
         self.clock = clock
+        self.store = store
+        self._cur_ws: int | None = None  # 当前监测窗口起点（订单钩子落库用）
+        if store is not None:
+            broker.hooks.add(self._on_order)
+
+    # ---- 阶段 2：SQLite 落库 ----
+
+    async def _on_order(self, order: Order) -> None:
+        """orders 表统一写入点（live/paper 共用，Broker on_order 钩子）。"""
+        if self.store is None:
+            return
+        self.store.upsert_order(
+            order, mode="paper" if self.dry else "live", symbol=self.symbol,
+            window_start=self._cur_ws, target_notional=self.p.target_notional,
+        )
 
     # ---- 窗口对齐 ----
 
@@ -149,6 +167,18 @@ class WindowOrchestrator:
         pending_cost = Decimal(0)  # 持有到结算仓位的成本（赎回前未计入 PnL）
         pending_count = 0  # 待结算仓位笔数
         s = get_settings()
+        store = self.store
+
+        # 重启恢复：上一次进程留下的未平仓持仓不再可监测（行情已过），
+        # 策略是持有到结算——由下方结算守护任务回填结果，无需人工介入。
+        if store is not None:
+            for pos in store.open_positions(self.symbol):
+                sl.line(f"[恢复] 上次进程遗留持仓：{pos['side']} @ {pos['entry_price']} "
+                        f"× {pos['filled_size']} 份（窗口 {pos['window_start']}，"
+                        f"成本 ${Decimal(pos['cost'])}）→ 等待结算回填。", event=True)
+            sweeper = asyncio.create_task(self._settlement_loop())
+        else:
+            sweeper = None
 
         try:
             for attempt in range(1, self.max_windows + 1):
@@ -165,6 +195,11 @@ class WindowOrchestrator:
                     continue
                 m, _raw, min_size = boot
                 up, down = up_down_tokens(m)
+                self._cur_ws = ws
+                if store is not None:
+                    store.upsert_window(self.symbol, ws, slug=m.slug,
+                                        question=m.question,
+                                        condition_id=m.condition_id)
                 sl.line(f"市场: {m.question}  (minSize={min_size})")
 
                 entered = False
@@ -321,6 +356,7 @@ class WindowOrchestrator:
                                     side_name = cand
                                     entry_price = order.avg_fill_price or ask
                                     filled = order.filled_size
+                                    entry_fee = taker_fee(entry_price, filled)
                                     st.update(pos_side=cand, pos_entry=entry_price,
                                               pos_filled=filled,
                                               tp_target=p.take_profit_price)
@@ -328,6 +364,18 @@ class WindowOrchestrator:
                                     sl.line(f"成交: {filled:.4f} 份 @ {entry_price:.4f}"
                                             f"（≈${entry_price * filled:.2f}）",
                                             event=True)
+                                    if store is not None:
+                                        store.open_position(
+                                            symbol=self.symbol, window_start=ws,
+                                            token_id=token_id,
+                                            condition_id=m.condition_id, side=cand,
+                                            entry_price=entry_price, filled_size=filled,
+                                            fee=entry_fee)
+                                        store.upsert_window(
+                                            self.symbol, ws, entered=True, side=cand,
+                                            entry_price=entry_price, filled_size=filled,
+                                            entry_cost=entry_price * filled,
+                                            entry_fee=entry_fee)
                                 else:
                                     st["entry_status"] = "市价单未成交"
                                     sl.line("市价单未成交，本窗口放弃。", event=True)
@@ -340,10 +388,12 @@ class WindowOrchestrator:
                         if entered and side_name is not None:
                             bb = b[side_name].get("best_bid")
                             exit_msg = ""
+                            is_stop = False
                             if decide_exit(bb, p):
                                 exit_msg = f"✅ 止盈: bid {bb} >= {p.take_profit_price}"
                             elif decide_stop(bb, p):
                                 exit_msg = f"🛑 止损: bid {bb} <= {p.stop_loss_price}"
+                                is_stop = True
                             if exit_msg:
                                 sl.line(exit_msg, event=True)
                                 token_id = up if side_name == "Up" else down
@@ -355,10 +405,23 @@ class WindowOrchestrator:
                                 sl.line(f"卖单: {o.status.value} {o.error or ''}", event=True)
                                 if o.status.value in ("FILLED", "PARTIAL") and o.avg_fill_price:
                                     pnl = (o.avg_fill_price - entry_price) * o.filled_size
-                                    sl.line(f"平仓 PnL ≈ ${pnl:+.2f}", event=True)
+                                    sell_fee = taker_fee(o.avg_fill_price, o.filled_size)
+                                    pnl -= sell_fee  # 出场 taker fee 计入实现盈亏
+                                    sl.line(f"平仓 PnL ≈ ${pnl:+.2f}"
+                                            f"（含出场 fee ${sell_fee:.2f}）", event=True)
                                     realized_pnl += pnl
                                     st["realized_pnl"] = str(realized_pnl)
                                     tp_hit = True
+                                    if store is not None:
+                                        store.close_position(
+                                            symbol=self.symbol, window_start=ws,
+                                            exit_price=o.avg_fill_price,
+                                            realized_pnl=pnl)
+                                        store.upsert_window(
+                                            self.symbol, ws,
+                                            stop_hit=is_stop, tp_hit=not is_stop,
+                                            exit_price=o.avg_fill_price,
+                                            realized_pnl=pnl)
                                     break
                                 # 未成交则下轮继续尝试
 
@@ -407,4 +470,37 @@ class WindowOrchestrator:
                     f"待结算 {pending_count} 笔 ${pending_cost:.2f} ===", event=True)
             return 0 if fills_done else 1
         finally:
+            if sweeper is not None:
+                sweeper.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await sweeper
             sl.close()
+
+    # ---- 阶段 2：结算回填守护任务 ----
+
+    async def _settlement_loop(self, *, interval: float = 60.0,
+                               grace_sec: int = 360) -> None:
+        """周期扫描 positions 表：窗口结束 + 宽限期后查 Gamma 回填结算。
+
+        进程被 kill 时未回填的仓位由下次启动的恢复逻辑/ pm-backfill 接管。
+        """
+        store = self.store
+        assert store is not None
+        while True:
+            await asyncio.sleep(interval)
+            pending = store.pending_settlement(
+                now_ts=int(self.clock()), grace_sec=grace_sec)
+            for row in pending:
+                try:
+                    async with GammaClient() as gamma:
+                        r = await settle_key(store, gamma, row["symbol"],
+                                            row["window_start"], dry=self.dry)
+                    if r and r.get("outcome"):
+                        self.sl.line(
+                            f"[结算] {row['symbol']} 窗口 {row['window_start']}: "
+                            f"{r['outcome']}（赢家 {r['winner']}）"
+                            f"PnL ${Decimal(str(r['pnl'])):+.2f}"
+                            + ("" if r.get("redeemed") else "，待赎回"),
+                            event=True)
+                except Exception as e:
+                    self.sl.line(f"[结算] 回填失败（下轮重试）：{str(e)[:80]}")

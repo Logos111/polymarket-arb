@@ -28,6 +28,7 @@ pm-crypto5m = "pm_arb.app.crypto5m:main"
 pm-trade5m = "pm_arb.app.trade5m:main"
 pm-record = "pm_arb.app.record_ticks:main"
 pm-redeem = "pm_arb.app.redeem:main"
+pm-backfill = "pm_arb.app.backfill:main"
 pm-bt5m = "pm_arb.strategies.crypto_5m.backtest.run:main"
 pm-grid5m = "pm_arb.strategies.crypto_5m.backtest.grid:main"
 
