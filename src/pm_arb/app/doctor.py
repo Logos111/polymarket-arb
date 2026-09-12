@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from pydantic import SecretStr
+
 from pm_arb import __version__
 from pm_arb.infra.config import get_settings
 from pm_arb.infra.logging import setup_logging
@@ -19,8 +21,9 @@ def main() -> int:
     print(f"pm-arb v{__version__} — environment doctor")
     print("=" * 68)
 
-    def secret_status(value: str) -> tuple[str, bool]:
-        return ("******** (set)", True) if value.strip() else ("(unset)", False)
+    def secret_status(value: SecretStr) -> tuple[str, bool]:
+        v = value.get_secret_value()
+        return ("******** (set)", True) if v.strip() else ("(unset)", False)
 
     rows: list[tuple[str, str, bool]] = [
         ("Gamma API endpoint", s.gamma_api_url, True),

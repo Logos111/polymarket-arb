@@ -35,6 +35,7 @@ from pm_arb.execution.broker import Broker
 from pm_arb.execution.orders import Order, Side
 from pm_arb.infra.config import get_settings
 from pm_arb.infra.store import Store
+from pm_arb.risk.gates import RiskGate
 from pm_arb.strategies.crypto_5m.context import WindowDataHub, fetch_raw_market
 from pm_arb.strategies.crypto_5m.decisions import (
     EntryAction,
@@ -64,6 +65,7 @@ class WindowOrchestrator:
         max_fills: int = 3,
         clock: Callable[[], float] = time.time,
         store: Store | None = None,
+        gate: RiskGate | None = None,
     ) -> None:
         self.symbol = symbol
         self.p = p
@@ -74,6 +76,7 @@ class WindowOrchestrator:
         self.max_fills = max_fills
         self.clock = clock
         self.store = store
+        self.gate = gate  # 阶段 4：下单前风控闸门（None=不设防，仅回测/测试）
         self._cur_ws: int | None = None  # 当前监测窗口起点（订单钩子落库用）
         if store is not None:
             broker.hooks.add(self._on_order)
@@ -195,6 +198,10 @@ class WindowOrchestrator:
                     continue
                 m, _raw, min_size = boot
                 up, down = up_down_tokens(m)
+                if self.gate is not None:
+                    gw = await self.gate.gas_warning()
+                    if gw:
+                        sl.line(gw, event=True)
                 self._cur_ws = ws
                 if store is not None:
                     store.upsert_window(self.symbol, ws, slug=m.slug,
@@ -204,6 +211,7 @@ class WindowOrchestrator:
 
                 entered = False
                 entry_done = False  # 已做出最终判定（成交 / 波动超限等不可恢复拒绝）
+                hard_stop: str | None = None  # KILL/熔断命中 → 清理后中止全部后续窗口
                 last_ask_reject: Decimal | None = None  # ask 拒绝只在价格变化时打印
                 side_name: str | None = None
                 entry_price: Decimal | None = None
@@ -344,42 +352,60 @@ class WindowOrchestrator:
                                 # live/paper 同一 Broker 协议路径
                                 token_id = up if cand == "Up" else down
                                 sl.line(d.log, event=True)
-                                order = await self.broker.place_market(
-                                    token_id, Side.BUY, p.target_notional, ref_price=ask
-                                )
-                                sl.line(f"买单: {order.status.value} {order.error or ''}",
-                                        event=True)
-                                if order.filled_size > 0 and order.status.value in (
-                                    "FILLED", "PARTIAL"
-                                ):
-                                    entered = True
-                                    side_name = cand
-                                    entry_price = order.avg_fill_price or ask
-                                    filled = order.filled_size
-                                    entry_fee = taker_fee(entry_price, filled)
-                                    st.update(pos_side=cand, pos_entry=entry_price,
-                                              pos_filled=filled,
-                                              tp_target=p.take_profit_price)
-                                    st["entry_status"] = f"已成交 {cand}"
-                                    sl.line(f"成交: {filled:.4f} 份 @ {entry_price:.4f}"
-                                            f"（≈${entry_price * filled:.2f}）",
+                                # ---- 阶段 4：下单前统一过闸。live/dry-run 同一
+                                # 规则（dry-run 无 balance_fn，余额项自动跳过）；
+                                # KILL/熔断属全局状态，中止全部后续窗口 ----
+                                do_order = True  # 闸门未配置时默认放行（回测/测试）
+                                if self.gate is not None:
+                                    v = await self.gate.check(
+                                        p.target_notional, now_ts=int(clock()),
+                                        window_start=ws)
+                                    do_order = v.ok
+                                    if not v.ok:
+                                        sl.line(f"🚧 风控拒绝[{v.code}]：{v.message}",
+                                                event=True)
+                                        st["entry_status"] = f"风控拒绝({v.code})"
+                                        if v.code in ("KILL_SWITCH", "CIRCUIT_BREAK"):
+                                            hard_stop = v.code
+                                            break
+                                        entry_done = True  # 其余拒绝放弃本窗口
+                                if do_order:
+                                    order = await self.broker.place_market(
+                                        token_id, Side.BUY, p.target_notional,
+                                        ref_price=ask)
+                                    sl.line(f"买单: {order.status.value} {order.error or ''}",
                                             event=True)
-                                    if store is not None:
-                                        store.open_position(
-                                            symbol=self.symbol, window_start=ws,
-                                            token_id=token_id,
-                                            condition_id=m.condition_id, side=cand,
-                                            entry_price=entry_price, filled_size=filled,
-                                            fee=entry_fee)
-                                        store.upsert_window(
-                                            self.symbol, ws, entered=True, side=cand,
-                                            entry_price=entry_price, filled_size=filled,
-                                            entry_cost=entry_price * filled,
-                                            entry_fee=entry_fee)
-                                else:
-                                    st["entry_status"] = "市价单未成交"
-                                    sl.line("市价单未成交，本窗口放弃。", event=True)
-                                    entry_done = True
+                                    if order.filled_size > 0 and order.status.value in (
+                                        "FILLED", "PARTIAL"
+                                    ):
+                                        entered = True
+                                        side_name = cand
+                                        entry_price = order.avg_fill_price or ask
+                                        filled = order.filled_size
+                                        entry_fee = taker_fee(entry_price, filled)
+                                        st.update(pos_side=cand, pos_entry=entry_price,
+                                                  pos_filled=filled,
+                                                  tp_target=p.take_profit_price)
+                                        st["entry_status"] = f"已成交 {cand}"
+                                        sl.line(f"成交: {filled:.4f} 份 @ {entry_price:.4f}"
+                                                f"（≈${entry_price * filled:.2f}）",
+                                                event=True)
+                                        if store is not None:
+                                            store.open_position(
+                                                symbol=self.symbol, window_start=ws,
+                                                token_id=token_id,
+                                                condition_id=m.condition_id, side=cand,
+                                                entry_price=entry_price, filled_size=filled,
+                                                fee=entry_fee)
+                                            store.upsert_window(
+                                                self.symbol, ws, entered=True, side=cand,
+                                                entry_price=entry_price, filled_size=filled,
+                                                entry_cost=entry_price * filled,
+                                                entry_fee=entry_fee)
+                                    else:
+                                        st["entry_status"] = "市价单未成交"
+                                        sl.line("市价单未成交，本窗口放弃。", event=True)
+                                        entry_done = True
                         elif not entered and not entry_done:
                             st["entry_status"] = decide_entry(
                                 elapsed, cand, ask, None, rtds.price_range, p).status
@@ -436,6 +462,12 @@ class WindowOrchestrator:
                     await rtds_task
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await feed_task
+
+                if hard_stop is not None:
+                    sl.line(f"=== 风控中止（{hard_stop}）：停止全部后续窗口。"
+                            f"Kill Switch 删除 runtime/KILL 解除；熔断 UTC 日界自动解除。 ===",
+                            event=True)
+                    return 2
 
                 if entered:
                     fills_done += 1

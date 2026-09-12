@@ -38,14 +38,13 @@ pkill -f "pm_arb.app.trade5m"
 
 ```
 src/pm_arb/
-├── infra/       # 配置（env/.env）、结构化日志
-├── data/        # Gamma / CLOB REST / WebSocket / 本地订单簿 / 数据录制
+├── infra/       # 配置（SecretStr 凭证）、结构化日志、SQLite 持仓库
+├── data/        # Gamma / CLOB REST / WS / 本地订单簿 / tick 录制与 Parquet 压实
 ├── execution/   # CLOB 下单撤单、订单状态机、链上 split/merge/redeem
-├── portfolio/   # 头寸、对账、PnL
-├── strategies/  # 互补套利 / NegRisk / 关联市场 / 跨平台 / 做市
-├── risk/        # 限额、腿风险、Kill Switch
-├── backtest/    # tick 回放与绩效评估
-└── app/         # 入口：doctor / recorder / paper / trader
+├── portfolio/   # 头寸、对账、PnL（预留）
+├── risk/        # 风控闸门：限额/熔断/重复入场/Kill Switch/余额 fail-closed
+├── strategies/  # crypto_5m：决策（decisions）/编排（orchestrator）/参数 + 回测引擎
+└── app/         # CLI 入口：doctor / setup / watch / trade5m / record / redeem / compact
 ```
 
 ## 开发
@@ -59,7 +58,8 @@ uv run pytest                 #  测试
 
 - [x] 阶段 0：脚手架与基础设施（配置 / 日志 / 自检）
 - [x] 阶段 1：数据层（Gamma 同步、CLOB REST、WS 订单簿、tick 录制）— 实网联调通过
-- [x] 阶段 2：交易接口（L1/L2 认证、下单封装、链上 split/merge/redeem）+ paper 模拟成交
+- [x] 阶段 2：交易接口（L1/L2 认证、下单封装、链上 split/merge/redeem）+ paper 模拟成交 + SQLite 结算闭环
 - [ ] 阶段 2.5：配置交易钱包私钥，小额真实验证下单/merge 闭环
-- [ ] 阶段 3：策略 A（互补套利）信号检测 + paper 跑通
-- [ ] 阶段 4+：风控硬化、NegRisk、跨平台、做市，详见项目规划
+- [x] 阶段 4（最小集）：下单前风控闸门（限额/熔断/重复入场/Kill Switch/余额 fail-closed）
+- [ ] 阶段 5：特征工程（Chainlink 更新频率等 F1-F8）与策略迭代
+- [ ] 阶段 6+：NegRisk、跨平台、做市，详见项目规划

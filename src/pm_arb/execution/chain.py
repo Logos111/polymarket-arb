@@ -110,7 +110,8 @@ class ChainClient:
             os.environ.setdefault("HTTPS_PROXY", self._settings.proxy_url)
 
         self.w3 = Web3(Web3.HTTPProvider(self._settings.polygon_rpc_url))
-        self.account = self.w3.eth.account.from_key(self._settings.private_key)
+        self.account = self.w3.eth.account.from_key(
+            self._settings.private_key.get_secret_value())
         self.address = self.account.address
         self.addrs = _load_addresses(self._settings.chain_id, self._settings.neg_risk_adapter)
 

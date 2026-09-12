@@ -48,12 +48,12 @@ class ClobTrader:
             from py_clob_client_v2.clob_types import ApiCreds
 
             kwargs["creds"] = ApiCreds(
-                api_key=s.clob_api_key,
-                api_secret=s.clob_api_secret,
-                api_passphrase=s.clob_api_passphrase,
+                api_key=s.clob_api_key.get_secret_value(),
+                api_secret=s.clob_api_secret.get_secret_value(),
+                api_passphrase=s.clob_api_passphrase.get_secret_value(),
             )
         if s.has_private_key:
-            kwargs["key"] = s.private_key
+            kwargs["key"] = s.private_key.get_secret_value()
 
         self._client = ClobClient(s.clob_api_url, **kwargs)
         self._address: str | None = None

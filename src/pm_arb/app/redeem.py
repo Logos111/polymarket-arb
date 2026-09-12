@@ -58,7 +58,8 @@ class Position:
 
 
 async def scan_window(
-    gamma: GammaClient, symbol: str, window_start: int, owner: str, ctf
+    gamma: GammaClient, symbol: str, window_start: int, owner: str, ctf,
+    decimals: int,
 ) -> list[Position]:
     """查单窗口结算结果 + owner 链上持仓（市场不存在返回空表）。"""
     m = await get_window_market(
@@ -69,11 +70,12 @@ async def scan_window(
         return []
     positions: list[Position] = []
     prices = dict(zip(m.outcomes, m.outcome_prices, strict=False))
+    scale = Decimal(10 ** decimals)
     for out, tid in zip(m.outcomes, m.clob_token_ids, strict=False):
         if out not in prices:
             continue  # 未结算（closed 但 outcomePrices 缺失），跳过
         bal = await asyncio.to_thread(ctf.functions.balanceOf(owner, int(tid)).call)
-        balance = Decimal(bal) / Decimal(10**6)
+        balance = Decimal(bal) / scale
         if balance <= 0:
             continue
         positions.append(
@@ -101,9 +103,12 @@ async def run(symbol: str, window_starts: list[int], execute: bool) -> int:
         return 2
 
     positions: list[Position] = []
+    # CTF 份额精度与 collateral（USDC）一致，动态读取避免硬编码漂移
+    decimals = int(await chain.usdc_decimals)
     async with GammaClient(s) as gamma:
         for ws in window_starts:
-            positions.extend(await scan_window(gamma, symbol, ws, owner, chain.ctf))
+            positions.extend(
+                await scan_window(gamma, symbol, ws, owner, chain.ctf, decimals))
 
     if not positions:
         print(f"{symbol} {window_starts}: 无待赎回持仓。")

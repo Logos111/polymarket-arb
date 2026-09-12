@@ -78,7 +78,9 @@ async def check() -> dict:
         trader = ClobTrader.authenticated(s)
         ping = await trader.ping()
         print(f"  CLOB 连接    : {'✅ 正常' if ping else '❌ 失败'}")
-        print(f"  L2 API key   : {s.clob_api_key or '（本次会话派生，未写入 .env）'}")
+        key_set = bool(s.clob_api_key.get_secret_value().strip())
+        key_disp = "已配置（****）" if key_set else "（本次会话派生，未写入 .env）"
+        print(f"  L2 API key   : {key_disp}")
         status["trader"] = trader
     except Exception as e:
         print(f"  CLOB 认证    : ❌ {type(e).__name__}: {str(e)[:120]}")

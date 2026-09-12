@@ -11,6 +11,9 @@
     PYTHONPATH=src python -m pm_arb.app.trade5m --symbol btc           # 真实下单
     PYTHONPATH=src python -m pm_arb.app.trade5m --symbol btc --now     # 调试：不等待窗口起点
     pm-trade5m --param take_profit_price=0.80                          # 覆盖任意策略参数
+
+风控（阶段 4）：下单前统一过闸（限额/熔断/重复入场/余额 fail-closed）；
+runtime/KILL 文件存在即拒绝新仓并停止进程（拍腿 Kill Switch）。
 """
 
 from __future__ import annotations
@@ -18,14 +21,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from decimal import Decimal
 
 from pm_arb.app.tui5m import SessionLog
+from pm_arb.execution.chain import ChainClient
 from pm_arb.execution.clob_broker import ClobBroker
 from pm_arb.execution.clob_trader import ClobTrader
 from pm_arb.execution.paper_runner import PaperRunner
 from pm_arb.infra.config import get_settings
 from pm_arb.infra.logging import setup_logging
 from pm_arb.infra.store import Store
+from pm_arb.risk.gates import RiskGate, RiskLimits
 from pm_arb.strategies.crypto_5m.orchestrator import WindowOrchestrator
 from pm_arb.strategies.crypto_5m.params import Crypto5mParams, parse_overrides
 
@@ -65,10 +71,38 @@ def main() -> int:
     # mode 列区分；live 库同时承担持仓持久化（kill 重启恢复）
     store = Store(DB_PATH)
 
+    # 阶段 4：风控闸门（限额/熔断/重复入场/Kill Switch）。live 额外挂链上
+    # 余额/gas 查询（fail-closed：查询失败也拒绝）；dry-run 无余额注入，
+    # 其余规则同样生效（闸门是同一套纯函数，只是 I/O 依赖可缺省）。
+    gate = RiskGate(
+        limits=RiskLimits(), live=not args.dry_run, kill_path="runtime/KILL",
+        day_stats_fn=store.day_stats,
+        window_open_fn=lambda ws: store.has_open_position(args.symbol, ws),
+    )
+    if not args.dry_run:
+        chain = ChainClient(s)
+
+        async def _usdc_balance() -> Decimal | None:
+            try:
+                return await chain.usdc_balance()
+            except Exception as e:
+                print(f"[风控] USDC 余额查询失败（将 fail-closed 拒绝下单）："
+                      f"{str(e)[:80]}")
+                return None
+
+        async def _gas_balance() -> Decimal | None:
+            try:
+                return await chain.pol_balance()
+            except Exception:
+                return None
+
+        gate.balance_fn = _usdc_balance
+        gate.gas_fn = _gas_balance
+
     orch = WindowOrchestrator(
         args.symbol, p, broker, SessionLog(sys.stdout.isatty()),
         dry=args.dry_run, max_windows=args.windows, max_fills=args.fills,
-        store=store,
+        store=store, gate=gate,
     )
     try:
         return asyncio.run(orch.run(now=args.now))

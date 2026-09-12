@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,8 +36,9 @@ class Settings(BaseSettings):
     clob_ws_user_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
 
     # ---- 钱包 / 链上 ----
-    # Polygon 交易钱包私钥（小额专用钱包）；日志/打印中永不明文输出
-    private_key: str = Field(default="", repr=False)
+    # Polygon 交易钱包私钥（小额专用钱包）；SecretStr 持有，日志/打印/
+    # repr 中永不明文泄漏，需要明文时显式 .get_secret_value()
+    private_key: SecretStr = Field(default=SecretStr(""), repr=False)
     chain_id: int = 137
     # Chainlink 喂价读取 RPC（5min 市场结算价同源；polygon-rpc.com 已 401，默认公共节点）
     price_feed_rpc_url: str = "https://polygon-bor-rpc.publicnode.com"
@@ -52,9 +53,9 @@ class Settings(BaseSettings):
     neg_risk_adapter: str = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
 
     # ---- CLOB L2 API 凭证（留空则后续用私钥派生）----
-    clob_api_key: str = Field(default="", repr=False)
-    clob_api_secret: str = Field(default="", repr=False)
-    clob_api_passphrase: str = Field(default="", repr=False)
+    clob_api_key: SecretStr = Field(default=SecretStr(""), repr=False)
+    clob_api_secret: SecretStr = Field(default=SecretStr(""), repr=False)
+    clob_api_passphrase: SecretStr = Field(default=SecretStr(""), repr=False)
 
     # ---- 运行参数 ----
     log_level: str = "INFO"
@@ -69,14 +70,14 @@ class Settings(BaseSettings):
     # ---- 便捷判断 ----
     @property
     def has_private_key(self) -> bool:
-        return bool(self.private_key and self.private_key.strip())
+        return bool(self.private_key.get_secret_value().strip())
 
     @property
     def has_clob_creds(self) -> bool:
         return bool(
-            self.clob_api_key.strip()
-            and self.clob_api_secret.strip()
-            and self.clob_api_passphrase.strip()
+            self.clob_api_key.get_secret_value().strip()
+            and self.clob_api_secret.get_secret_value().strip()
+            and self.clob_api_passphrase.get_secret_value().strip()
         )
 
     @property

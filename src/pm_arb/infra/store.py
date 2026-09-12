@@ -259,3 +259,34 @@ class Store:
             (_now(), symbol, window_start),
         )
         self.conn.commit()
+
+    # ---- 阶段 4：风控闸门的状态聚合 ----
+
+    def day_stats(self, day_start: int) -> tuple[Decimal, Decimal]:
+        """（当日投入合计, 当日已实现盈亏）——window_start ∈ [day_start, day_start+86400)。
+
+        已实现 = realized_pnl（止盈/止损平仓）+ settle_pnl（结算回填，
+        赢 = 售价−成本−fee，输 = −成本−fee），与资金真实增减同口径。
+        TEXT 列 CAST REAL 聚合：闸门判断是数量级比较，浮点精度足够
+        （结算入账仍是 TEXT Decimal，无损）。
+        """
+        cur = self.conn.execute(
+            """SELECT
+                 COALESCE(SUM(CAST(entry_cost AS REAL)), 0),
+                 COALESCE(SUM(CAST(realized_pnl AS REAL)), 0)
+                 + COALESCE(SUM(CAST(settle_pnl AS REAL)), 0)
+               FROM windows
+               WHERE window_start >= ? AND window_start < ?""",
+            (day_start, day_start + 86_400),
+        )
+        invested, realized = cur.fetchone()
+        return Decimal(str(invested)), Decimal(str(realized))
+
+    def has_open_position(self, symbol: str, window_start: int) -> bool:
+        """同窗口是否已有未平仓持仓（防崩溃恢复后重复入场）。"""
+        cur = self.conn.execute(
+            "SELECT 1 FROM positions"
+            " WHERE symbol=? AND window_start=? AND status='open' LIMIT 1",
+            (symbol, window_start),
+        )
+        return cur.fetchone() is not None
