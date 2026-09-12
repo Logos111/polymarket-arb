@@ -18,6 +18,9 @@ dependencies = [
     "pyarrow>=25.0.1",
     "tzdata>=2026.3",
     "numpy>=2.5.3",
+    # cp314 wheel DLL 损坏（实测 2026-09），仅装到 <3.14 解释器；
+    # pm-compact 须以 3.12 运行（见 app/compact.py docstring）
+    "duckdb>=1.4; python_version < '3.14'",
 ]
 
 [project.scripts]
@@ -29,6 +32,7 @@ pm-trade5m = "pm_arb.app.trade5m:main"
 pm-record = "pm_arb.app.record_ticks:main"
 pm-redeem = "pm_arb.app.redeem:main"
 pm-backfill = "pm_arb.app.backfill:main"
+pm-compact = "pm_arb.app.compact:main"
 pm-bt5m = "pm_arb.strategies.crypto_5m.backtest.run:main"
 pm-grid5m = "pm_arb.strategies.crypto_5m.backtest.grid:main"
 

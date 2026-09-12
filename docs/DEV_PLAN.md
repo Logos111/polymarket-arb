@@ -1,248 +1,245 @@
 # 开发计划与项目进程（活文档）
 
-> 版本：v1.4 ｜ 日期：2026-09-12
+> 版本：v2.1 ｜ 日期：2026-09-13
 > **本文档是项目的方向与进展跟踪文档，实施过程中随进度持续更新。**
-> 每完成一项：勾选 `[x]` 并在文末变更记录登记；发现新问题/新决策：修订对应章节并升级版本号。
-> 前置阅读：[PROJECT_PLAN.md](PROJECT_PLAN.md)（最初总体规划，本文修订其阶段 3 之后的路线）
+> v2.0 起每阶段采用统一结构：**目标 / 交付物（文件级）/ 完成判据 / 验证证据 / 遗留项**；
+> 全部进度声明已经过对本地代码、测试与 pyproject 入口的逐条核查。
+> 前置阅读：[PROJECT_PLAN.md](PROJECT_PLAN.md)（最初总体规划，阶段 3 之后路线以本文为准）。
 
 ---
 
-## 进展面板（实时状态）
+## 〇、进展总面板
 
-| 阶段 | 内容 | 状态 | 备注 |
-|---|---|---|---|
-| 0.1 | 结算规则实证 → docs/settlement-rule.md | ✅ 完成 | 规则钉死（TWAP≥起点价→Up）+ taker fee 公式确认；578 窗口实证 |
-| 0.2 | pm-record 独立 24/7 录制脚本 | ✅ 完成 | 已上线挂机，三路流非零；原始帧证实无 price_change |
-| 0.3 | 成交解析 bug（疑似已修）+ size=0 误判 FILLED | ✅ 完成 | ref_price 估算目标份数；部分成交单测；打印统一 _fmt |
-| 0.4 | PnL 口径 + pm-redeem 赎回脚本 | ✅ 完成 | 两栏 PnL；dry-run 实测 4 笔仓位吻合；proxy 链上赎回留阶段 2 |
-| 1 | 模块化重构（决策纯函数） | ✅ 完成 | A `504e6b2` / B `6f9198e` / C 见最新提交；拆分见 4.3 节 |
-| 2 | SQLite 结构层 + 结算回填 + 自动赎回 | ✅ 完成 | store.py 三表 + on_order 钩子 + 结算守护/回填 + 重启恢复；proxy 赎回仍留待 Safe 授权（见 0.4 遗留） |
-| 3 | 回测引擎（17 份日志回放对账） | 🔄 提前交付 HF 版 | HF 公开数据集引擎+60 组扫描已提交（`fd1496d`）；17 份日志回放对账待自录数据 |
-| 4 | 风控最小集 | ⬜ 未开始 | 与 1–3 并行，放量前必须完成 |
-| 5 | 参数扫描（walk-forward）+ 一致性回归 | ⬜ 未开始 | 持续 |
+| 阶段 | 内容 | 完成度 | 状态 | 下一步 / 阻塞 |
+|---|---|---|---|---|
+| 0 | 结算规则实证 + bug 修复 + 录制脚本 | 4/4 | ✅ 完成 | — |
+| 1 | 模块化重构（决策纯函数） | 5/5 | ✅ 完成 | — |
+| 2 | SQLite 存储层 + 结算闭环 | 4/6 | ✅ 主体完成 | 遗留：proxy Safe 赎回（2.5）、trade5m 接 recorder（2.6） |
+| 3 | 回测引擎（HF 数据集版） | 3/4 | 🔄 进行中 | 遗留：实盘日志回放对账（3.4，待自录数据积累） |
+| 4 | 风控最小集 | 0/4 | ⬜ 未开始 | **放量硬前提**，当前最高工程优先级 |
+| 5 | 参数扫描 + 特征工程 + 一致性回归 | 2/6 | 🔄 进行中 | 参数平面已扫完（无解）；转向特征工程（5.3–5.5） |
+| 6 | 工程卫生与治理 | 0/6 | ⬜ 未开始 | 见第七节，含 2 项高优先级 |
 
 状态图例：⬜ 未开始 ｜ 🔄 进行中 ｜ ✅ 完成 ｜ ⏸ 暂缓
 
----
+**当前策略基线参数**（[params.py](../src/pm_arb/strategies/crypto_5m/params.py) 默认值，实盘/回测单一来源）：
+名义 $2.00/窗；入场窗口 [70s, 135s]；入场价 [0.15, 0.30]；止盈 0.99；止损 0（关闭，已被 27 组扫描证伪）；max_vol $30；轮询 2s；ws_fresh 10s / feed_fresh 15s；结算前 60s 停止操作。
 
-## 一、背景与问题
-
-5m Up/Down 策略（[trade5m.py](../src/pm_arb/app/trade5m.py)）已实盘跑通，runtime/logs 有 4.5 小时真实成交记录。经两轮代码勘察 + 人工复核 17 份实盘日志，确认以下缺口。
-
-### 地基缺口（回测能否"准"的前提）
-
-| # | 问题 | 影响 |
-|---|---|---|
-| 1 | **结算规则无权威依据**：全仓库没有一处明确写出 Up/Down 判定规则。`rtds.py` 中 `base` 字段注释（"feed 生命周期内首个观测值"）是代码作者假设，无官方文档出处。官方文档 chainlink-twap.md 只描述 TWAP 数据流本身，且警告"Chainlink 不公布采样边界/权重/舍入，勿自行复现 TWAP" | 规则不钉死，回测胜率/PnL 全部不可信 |
-| 2 | **历史数据基本为空**：TickRecorder 是孤儿模块（trade5m 从未导入），runtime/ 只有 17 份人类可读文本日志（≈4.5 小时，可用入场样本可能仅十几笔）。策略文档自认"预期胜率低于 50%"，调参需几百笔入场样本（p=0.5±0.05 需 ~384 个，已验算） | 数据积累受墙钟约束（1–2 周不同时段），必须最先启动 |
-
-### 工程缺口（v1.1 修订）
-
-| # | 问题 | 状态 |
-|---|---|---|
-| 3 | 580 行单文件，判定逻辑混在巨型协程 `try_window()`（~320 行）；回测无法复用同一套判定函数 | 待阶段 1 |
-| 4 | ~~place_market 成交解析 bug（`FILLED 但成交 0.0000 份`）~~ | **疑似已修**：事故（01:56:03）8 分钟后的提交 `4d0fc18` 重写了 place_market（花费/份数比值算法）；其后同日三笔成交（02:36/02:46/02:51）全部正常。**待 10 分钟验证后从阶段 0 划掉** |
-| 4a | **[新发现] `order.size` 硬编码 0 → PARTIAL 误判 FILLED**：`Order.apply_fill()` 用 `filled_size >= size` 判完成，而市价单 `size=0`，任何 1% 部分成交都会被判成终态 FILLED。当前 trade5m 把两种状态都当"够用"所以功能不出错，但阶段 2 落 SQLite、阶段 5 算胜率时会**系统性把部分成交标成完全成交，污染回测标签** | 待阶段 0.3 |
-| 5 | 持仓到结算无自动 redeem（chain.py 已实现未接线）；结算输赢从未落盘，真实期望无法核算 | 待阶段 0.4 / 2 |
-| 6 | 进程重启丢持仓；无风控；`strategies/`、`risk/`、`backtest/`、`portfolio/` 全是空壳 | 待阶段 1/2/4 |
-
-### 已确认的决策
-
-- 存储选型：**SQLite**（结构化层）+ JSONL（原始 tick 流）
-- 胜率优化路径：**统计 + 参数扫描**（样本量到之前不上 ML）
-- 缺口修复（结算赎回闭环、成交 bug、真实 PnL、风控最小集）**全部纳入本轮**
+**测试基线**：pytest **127 项**全绿（124 passed + 3 skipped：duckdb 集成用例仅 <3.14 解释器可跑）；ruff 零警告。
 
 ---
 
-## 二、实施路线（按依赖 + 墙钟约束排序）
+## 一、背景与原始缺口（2026-09-11 勘察，均已闭环或转入跟踪）
 
-```
-阶段0 结算规则实证 + bug修复 + 录制脚本（1–2 天）
-  │   ├─ 0.1 结算规则实证 → docs/settlement-rule.md
-  │   ├─ 0.2 pm-record 独立 24/7 录制脚本（第一天上线，攒数据与开发并行）
-  │   ├─ 0.3 成交解析验证 + size=0 误判修复
-  │   └─ 0.4 PnL 口径 + pm-redeem 赎回脚本
-  │         ────── 阶段 0 完成后提交 git，录制开始挂机 ──────
-  ├────────> 阶段2 数据管道（SQLite + 结算回填 + 自动赎回 + 持仓持久化，2–4 天）
-  │                        │
-阶段1 模块化重构（决策纯函数，2–3 天）──> 阶段3 回测引擎（1–1.5 周）
-  │
-  └────────> 阶段4 风控最小集（1–2 天，与 1–3 并行，放量前必须完成）
-                                  │
-                          阶段5 参数扫描 + 一致性回归（持续）
-```
-
-**排序理由**：录制脚本独立于模块化——数据积累要 1–2 周墙钟时间，必须第一天上线；模块化（决策纯函数抽取）是回测复用生产代码的前提；17 份日志不够调参但足以做**回测引擎正确性校验**。
-
----
-
-## 三、阶段 0：结算规则实证 + bug 修复 + 录制脚本
-
-### 0.1 钉死结算规则（一切的地基）✅ 完成（2026-09-12）
-
-- [x] 用 Gamma API 拉取**已结算的 5min 历史市场**：**卡点已解——查询必须带 `closed=true`**（不带/带 `false` 均返回空）；规则原文已从 description 一手核实写入 settlement-rule.md；
-- [x] 用 Binance 5m K 线交叉验证：578 窗口（btc+eth 24h），R_close 总一致率 84.6%，分歧集中于平坦窗口（<0.02% → 56.9%，≥0.5% → 100%），结构与交易所价差假设完全吻合；
-- [ ] （pm-record 上线后）用录制的 RTDS full_accuracy_value 直接复核 TWAP 数值与"起点价"口径；
-- [x] **确认 taker fee**：`fee = C × feeRate × p × (1−p)`，Crypto 类 feeRate=0.07，仅 taker 收费（官方 fees.md + Gamma feeSchedule 双源一致）；PnL 口径已写入 settlement-rule.md；
-- [x] 产出 **docs/settlement-rule.md**（v1.0）。回测结算标签一律以 Gamma outcomePrices 为权威，规则推导仅作无回填窗口的补充且按平坦度分桶标注置信度。
-
-### 0.2 独立 24/7 纯录制脚本 ✅ 完成（2026-09-12 上线挂机）
-
-- [x] 新增 `app/record_ticks.py`，注册 `pm-record`：复用 `RtdsTwapFeed` + `MarketDataFeed`（含空闲看门狗 / is_fresh 兜底），不下单不占资金；
-- [x] 落盘三路流（按天分片 append-only）：`{date}_market.jsonl`（typed WS 事件 + **RestBook** + 连接事件 + WindowMeta）、`{date}_rtds_{sym}.jsonl`（原始 payload 含 full_accuracy_value）、`{date}_raw_ws.jsonl`（原始帧，默认全录可 `--raw-sample` 抽样，单帧截断 8KB）；
-- [x] WS 连接事件流：`WsReconnect`/`WsDisconnected` 落 market 流（feed 层 on_conn_event 钩子）；
-- [x] **原始帧验证完成**：2000 帧样本仅含 `book`(1378) + `last_trade_price`(642)，**无任何 price_change**——“增量恒 0 是服务端行为”假设成立，阶段 3 按快照回放的前提钉死；
-- [x] 附带修复两个录制可靠性问题：①JsonlWriter 每 50 行强制 flush（8KB 用户态缓冲可滞留数分钟，外部进程误判无数据）；②RTDS 业务级看门狗（服务端空帧心跳会喂饱链路层看门狗，订阅静默失效时需按业务时钟重连，且宽限期基线含连接时刻防重连风暴）；
-- [ ] 挂服务器 24/7 覆盖不同时段（当前挂本机，服务器迁移待定）；积累 24h 后检查数据完整性。
-
-### 0.3 成交解析验证 + size=0 误判修复 ✅ 完成（2026-09-12）
-
-- [x] **修复 [问题 4a]**：`place_market` 下单前用 `ref_price` 估算目标份数赋给 `order.size`，让 FILLED/PARTIAL 区分有意义；同时约定：**阶段 2 SQLite 落库一律用 `filled_size` 对比目标名义金额算实际成交比例，不依赖 status 字段**（双保险）；
-- [x] 部分成交语义单测验证（含 `avg_fill_price` None 兜底），`4d0fc18` 花费/份数算法确认正常；
-- [x] 顺带修成交价 28 位小数打印（统一 `_fmt`）。
-
-### 0.4 PnL 口径 + 赎回脚本 ✅ 完成（2026-09-12）
-
-- [x] realized_pnl 分"已止盈 / 待结算"两栏统计（TUI 头部 + 窗口收尾/终局事件行同步）；
-- [x] 新增 `app/redeem.py`（`pm-redeem`）：`--window-start` 显式指定或 `--windows N` 回溯，Gamma closed=true 查结算 + CTF balanceOf(owner) 核对持仓 + 赢方应赎报告，`--execute` 走 `ChainClient.redeem`；
-- [x] **--dry-run 实测通过**：09-10/11 四笔实盘仓位全在 funder（proxy）名下、全为输方（应赎 $0.00），与链上探针完全吻合；
-- [ ] **遗留到阶段 2**：owner 为 funder proxy（signature_type=3）时链上赎回须从 proxy 发起（Safe execTransaction + EIP-1271 签名），当前 `--execute` 明确拒绝该场景，避免从 signer 盲发无效交易。
-
-**阶段 0 验证**：✅ settlement-rule.md 实证（578 窗口）+ taker fee 结论；✅ pm-record 挂机双流数据非零且增长 + 原始帧确认 event_type；✅ 部分成交语义单测；✅ `pm-redeem --dry-run`（4 笔实盘仓位核对一致）；✅ pytest 67/67 全绿；✅ git 提交。
-
----
-
-## 四、阶段 1：模块化重构——决策纯函数抽取
-
-### 目标布局
-
-```
-src/pm_arb/
-├── strategies/crypto_5m/
-│   ├── params.py        # Crypto5mParams(pydantic)：11 个常量 → 可配置（CLI --param k=v）
-│   ├── decisions.py     # 纯决策：decide_entry / decide_exit / pick_underdog / calc_size
-│   ├── context.py       # WindowDataHub：盘口(WS/REST)+RTDS+新鲜度+时钟注入
-│   └── orchestrator.py  # 窗口生命周期：对齐/引导/守卫/循环/清理
-├── execution/
-│   ├── broker.py        # Broker Protocol + on_order 钩子
-│   ├── clob_broker.py   # live（包装 ClobTrader）
-│   └── paper_runner.py  # dry-run（复用 PaperBroker）
-└── app/
-    ├── tui5m.py         # SessionLog + _render_tui（纯搬运）
-    └── trade5m.py       # 瘦 CLI（~90 行），注册 pm-trade5m
-```
-
-### 关键设计决策
-
-1. **回测与实盘同一套判定函数**：decisions.py 是唯一决策来源，实盘 orchestrator 与回测引擎都调它——防两套逻辑漂移；
-2. **时间注入**：context.py 提供 `clock: Callable[[], float]`；策略/编排层禁止直接调 `time.time()`；`LocalOrderBook.age()` 接受 `now` 覆盖；
-3. **dry-run 换 PaperBroker**（唯一行为改进点）：扩展 paper.py 的 `submit_market_buy`（按美元逐档吃 ask）/ `submit_market_sell` / `settle`（$1/$0 兑付）。
-
-### 4.3 [v1.1 新增] 提交拆分纪律（真实资金在跑，必须可精确 bisect）
-
-| 批次 | 内容 | 性质 | 验证 |
+| # | 问题（当时发现） | 解决于 | 现状 |
 |---|---|---|---|
-| commit A | 纯函数抽取（常量→params.py、判定→decisions.py、TUI/数据访问搬运） | **行为不变** | dry-run 基线 diff 一致 + 特征化测试 |
-| commit B | Broker 协议 + paper_runner（dry-run 换 PaperBroker） | 引入新行为 | PaperBroker 单测 |
-| commit C | orchestrator + 瘦 CLI | 装配 | 全量测试 |
+| 1 | 结算规则无权威依据，`rtds.py` base 语义是代码假设 | 阶段 0.1 | ✅ [settlement-rule.md](settlement-rule.md) 钉死（TWAP≥起点价→Up；578 窗口实证；taker fee=C×0.07×p×(1−p)） |
+| 2 | 历史数据基本为空（TickRecorder 是孤儿模块） | 阶段 0.2 / 3.1 | ✅ pm-record 挂机 + HF 数据集（2026-03~05，BTC/ETH）双轨积累 |
+| 3 | 580 行单文件，判定逻辑无法回测复用 | 阶段 1 | ✅ decisions.py 纯函数，实盘/回测共用 |
+| 4 / 4a | place_market 成交解析 bug；order.size=0 致 PARTIAL 误判 FILLED | 阶段 0.3 | ✅ ref_price 预估份数 + 落库用 filled_size 双保险（test_orders 4 项回归） |
+| 5 | 持仓到结算无自动 redeem；结算输赢不落盘 | 阶段 0.4 / 2 | ✅ 结算守护 + pm-backfill 回填；⏸ proxy（signature_type=3）赎回仍待 Safe 授权 |
+| 6 | 进程重启丢持仓；无风控；策略/风控/组合层空壳 | 阶段 1/2/4 | 🟡 重启恢复 ✅；strategies/crypto_5m 已成完整包；**risk/、portfolio/ 仍为空壳**（仅 docstring）→ 阶段 4 |
 
-重构前先跑 `pm-trade5m --dry-run --now --windows 1` 留基线日志。
+### 已确认的架构决策（仍然有效）
 
----
-
-## 五、阶段 2：数据管道结构层 + 结算闭环
-
-### SQLite 结构层（infra/store.py，WAL 模式，Decimal 存 TEXT）
-
-| 表 | 用途 |
-|---|---|
-| `orders` | 所有 live/paper 订单（Broker on_order 钩子统一写入；**成交比例用 filled_size/目标名义计算，不依赖 status**——见问题 4a） |
-| `windows` | 每窗口一行：entered / entry_price / tp_hit / **settlement_outcome** / redeemed / realized_pnl |
-| `positions` | 持仓持久化（启动读未平仓记录，修复重启丢持仓） |
-| `backtest_runs` | 阶段 5 留痕 |
-
-### 结算结果记录 + 自动赎回
-
-- [x] 窗口结束后 5–10 分钟按 slug 查 Gamma（closed 市场带 outcomePrices）回填 `windows.settlement_outcome` 与 `realized_pnl`（赢：filled_size×1−成本；输：−成本；**含 taker fee 口径**）；
-- [x] **历史回填器** `app/backfill.py`（`pm-backfill`）：任意历史窗口批量查 Gamma 拿结算——没交易没录制的窗口也能拿到，回测样本的关键放大器；
-- [x] 结算回填成功且 tp_hit=0 的仓位自动触发 `ChainClient.redeem`，更新 redeemed=1；**proxy 钱包（signature_type=3，实盘现状）只记待赎不盲发链上交易**（阶段 0.4 遗留不变）；
-- [ ] trade5m 实盘接 recorder（与 pm-record 相同落盘格式）。
-
-**验证**：✅ sqlite 查询窗口结算（真实 Gamma 回填 29 窗口 + 预置持仓 lose 结算 -$2.10 与手算一致）；✅ kill 重启恢复（open_positions 遗留持仓打印 + 结算守护接管）；✅ pytest 118/118 全绿；✅ git 提交。
+- 存储选型：**SQLite（WAL）结构化层 + JSONL 原始 tick 流 + 已封口整日文件压实为分区 Parquet（v2.1）**；网格结果暂落 CSV（见 3.2 遗留）。压实实测 25x（490MB→19.5MB/日），pm-compact 行数校验通过才删源。
+- 判定/参数/执行三层各自可替换：decisions.py 唯一决策来源、params.py 唯一参数来源、Broker Protocol 唯一执行入口。
+- 胜率优化路径：统计 + 参数扫描 + **特征工程**（v1.5 起新增，见阶段 5.3）；样本量不足前不上 ML。
+- 方向选择：深耕 crypto_5m 冷门方策略；PROJECT_PLAN 的 NegRisk/跨平台/做市降级为远期可选。
 
 ---
 
-## 六、阶段 3：回测引擎
+## 二、阶段 0：结算规则实证 + bug 修复 + 录制脚本（✅ 4/4）
+
+### 0.1 结算规则实证 ✅
+- 交付物：[docs/settlement-rule.md](settlement-rule.md)（v1.0）
+- 判据与证据：Gamma API 已结算市场查询须带 `closed=true`；Binance 5m K 线 578 窗口交叉验证（总一致率 84.6%，分歧集中于平坦窗口 <0.02%→56.9%、≥0.5%→100%）；taker fee 公式官方文档 + Gamma feeSchedule 双源一致。
+- 遗留：pm-record 录制的 RTDS full_accuracy_value 与"起点价"口径直接复核（长期项，数据已在录）。
+
+### 0.2 pm-record 独立 24/7 录制 ✅
+- 交付物：[app/record_ticks.py](../src/pm_arb/app/record_ticks.py)（入口 `pm-record`）、[data/recorder.py](../src/pm_arb/data/recorder.py)（JsonlWriter/TickRecorder）
+- 判据与证据：三路流按天分片（`{date}_market.jsonl` / `{date}_rtds_{sym}.jsonl` / `{date}_raw_ws.jsonl`）；原始帧 2000 帧样本证实无 price_change（快照-only 是服务端行为）；JsonlWriter 每 50 行强制 flush；RTDS 业务级看门狗。
+- 遗留：挂服务器 24/7（当前挂本机；runtime/ticks 已有 09-08、09-12 数据）。
+
+### 0.3 成交解析 + size=0 误判修复 ✅
+- 交付物：[execution/clob_trader.py](../src/pm_arb/execution/clob_trader.py) place_market（ref_price 预估份数）、[execution/orders.py](../src/pm_arb/execution/orders.py)
+- 验证证据：tests/test_orders.py 中 `test_place_market_buy_estimates_size_from_ref_price` 等 4 项回归；`test_market_order_zero_size_fill_fallback`。
+
+### 0.4 PnL 口径 + pm-redeem ✅（含 1 项已知限制）
+- 交付物：[app/redeem.py](../src/pm_arb/app/redeem.py)（入口 `pm-redeem`）
+- 验证证据：--dry-run 实测 09-10/11 四笔实盘仓位与链上探针吻合。
+- 已知限制：owner 为 funder proxy（signature_type=3）时 `--execute` 明确拒绝链上赎回（见 redeem.py docstring）；`balance` 换算硬编码 `10**6`（redeem.py:76，与 chain.py 动态 `usdc_decimals` 不一致）→ 转入阶段 6 卫生项 #4。
+
+---
+
+## 三、阶段 1：模块化重构（✅ 5/5）
+
+| 子项 | 交付物 | 验证证据 |
+|---|---|---|
+| 1.1 参数单一来源 ✅ | [params.py](../src/pm_arb/strategies/crypto_5m/params.py)（Crypto5mParams frozen + parse_overrides） | `pm-trade5m --param k=v`；test_decisions::test_params_defaults |
+| 1.2 决策纯函数 ✅ | [decisions.py](../src/pm_arb/strategies/crypto_5m/decisions.py)（pick_underdog/calc_size/decide_entry/decide_exit/decide_stop，无 I/O 无时钟） | test_decisions.py 15 项 |
+| 1.3 上下文 + 时钟注入 ✅ | [context.py](../src/pm_arb/strategies/crypto_5m/context.py)（WindowDataHub，clock 注入，禁直接 time.time()） | test_feed_freshness.py 5 项 |
+| 1.4 编排器 + 瘦 CLI ✅ | [orchestrator.py](../src/pm_arb/strategies/crypto_5m/orchestrator.py)（WindowOrchestrator）、[trade5m.py](../src/pm_arb/app/trade5m.py)（瘦 CLI，入口 `pm-trade5m`）、[tui5m.py](../src/pm_arb/app/tui5m.py) | 提交拆分 A `504e6b2` / B `6f9198e` / C `d432e04`，可精确 bisect |
+| 1.5 Broker Protocol ✅ | [execution/broker.py](../src/pm_arb/execution/broker.py)（Protocol + on_order 钩子）、[clob_broker.py](../src/pm_arb/execution/clob_broker.py)（live）、[paper_runner.py](../src/pm_arb/execution/paper_runner.py)（dry-run/回测，真实档深 VWAP 撮合） | test_broker.py 9 项 |
+
+---
+
+## 四、阶段 2：SQLite 存储层 + 结算闭环（✅ 4/6，2 项遗留转入跟踪）
+
+| 子项 | 交付物 | 状态 | 验证证据 |
+|---|---|---|---|
+| 2.1 SQLite 三表 | [infra/store.py](../src/pm_arb/infra/store.py)：`orders` / `windows` / `positions`（WAL，Decimal 存 TEXT，fill_ratio 不依赖 status） | ✅ | test_store.py 8 项 |
+| 2.2 on_order 钩子统一写入 | orchestrator._on_order → Store.upsert_order（live/paper 共用） | ✅ | test_broker::test_clob_broker_delegates_and_emits_hook 等 |
+| 2.3 结算守护 + 批量回填 | [data/settlement.py](../src/pm_arb/data/settlement.py)（market_winner/settle_result/settle_key）+ orchestrator._settlement_loop（60s 扫描，360s 宽限期）+ [app/backfill.py](../src/pm_arb/app/backfill.py)（`pm-backfill --windows/--since`，无交易窗口也回填 market_winner 作样本放大器） | ✅ | 真实 Gamma 回填 29 窗口 + 预置持仓 lose 结算 -$2.10 与手算一致；平仓 PnL 含出场 taker fee |
+| 2.4 重启恢复 | run() 启动 open_positions 打印遗留持仓 + sweeper 接管 | ✅ | kill 重启实测 |
+| 2.5 赢单自动赎回 | settlement.py：仅 EOA（signature_type≠3）尝试链上赎回；proxy 只记待赎 | ⏸ 遗留 | **待办**：proxy Safe execTransaction + EIP-1271 签名授权路径（实盘钱包现状，未解除前赢单资金滞留 proxy） |
+| 2.6 trade5m 实盘接 recorder | — | ⬜ 遗留 | **待办**：trade5m.py 当前未 import recorder（grep 核实）；复盘真实交易盘口上下文需手动对齐日志与 pm-record 数据流；接入格式与 pm-record 一致 |
+
+> **v2.0 更正**：原规划表中列有 `backtest_runs` 表（阶段 5 留痕用）——**实际未建**，网格结果当前落 [runtime/grid_runs.csv](../runtime/grid_runs.csv)。若阶段 5.3 特征分析需要结构化留痕再补建。
+
+---
+
+## 五、阶段 3：回测引擎（🔄 3/4）
+
+### 实际交付布局（v2.0 按代码核实修正，替代旧版设想布局）
 
 ```
-backtest/
-├── logparse.py   # 17 份实盘 .log → 结构化表（elapsed/TWAP/双边bid-ask-size/来源）
-├── loader.py     # JSONL tick → (recv_ts, event) 合并流，按时间排序
-├── engine.py     # 虚拟时钟事件驱动回放（复用 LocalOrderBook + decisions.py）
-├── settlement.py # 结算模拟（依据 settlement-rule.md 钉死的规则）
-├── metrics.py    # 胜率/PnL分布/过滤漏斗/参数敏感性
-└── report.py     # 终端报表
+src/pm_arb/strategies/crypto_5m/backtest/
+├── hf_loader.py   # HF 数据集加载（btc/eth markets+ticks parquet，outcome 为推断标签）
+├── engine.py      # 事件驱动回放：replay_ticks / replay_window / run_backtest / run_grid，
+│                  #   taker_fee 与 ExitKind；复用 decisions.py + params.py
+├── spot_vol.py    # SpotVol：Binance 1s K 线重建滚动 TWAP-60s，输出窗口 high-low range 序列
+├── grid.py        # 参数网格 + walk-forward（pm-grid5m，分片并行）
+├── run.py         # 单组参数回测 CLI（pm-bt5m，--param k=v，--spot 接现货过滤）
+└── report.py      # 终端报表
 ```
 
-### 四条铁律
+### 子项状态
 
-1. **判定复用生产代码**：engine 调 decisions.py 同一套函数，数据源从实时流换成历史迭代器；
-2. **严防前视偏差**：TWAP high/low 按截止当前模拟时刻的数据滚动计算（与实盘 rtds.high/low 行为一致），绝不用窗口最终 high/low 做判定；
-3. **撮合保守**：录制数据只有最优一档 bid/ask/size。份数超过 ask_size 时按部分成交或放弃处理，报告明确标注假设，避免虚高收益；**（前提：0.2 的原始帧验证已确认快照-only 是服务端行为）**；
-4. **回放对账校验引擎本身**：拿 17 份日志的实盘片段重放（logparse → engine），算出的入场/止盈判定必须与当时实盘决策一致，否则引擎有 bug。
+| 子项 | 状态 | 交付物 / 证据 |
+|---|---|---|
+| 3.1 HF 数据集回测引擎 | ✅ | engine.py + hf_loader.py + run.py（`fd1496d`）；test_hf_engine.py 13 项 |
+| 3.2 参数网格 + walk-forward | ✅ | grid.py：60 组网格（前 70% 调参 / 后 30% 验证）；结果落 runtime/grid_runs.csv（**未落 SQLite，见 2.1 更正**）；报告 [backtest/runtime/backtest-report-b07.md](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b07.md) 及同目录历史报告 |
+| 3.3 现货波动过滤（b07） | ✅ | spot_vol.py + [scripts/fetch_spot_1s.py](../scripts/fetch_spot_1s.py)（Binance 1s K 线 → runtime/hf/*_spot_1s.parquet，各约 492 万行）；test_spot_vol.py 5 项 |
+| 3.4 实盘日志回放对账 | ⬜ | **待办**：17 份历史日志（runtime/logs 现已有 20 份 trade5m 日志）重放核对引擎决策与实盘一致；依赖 pm-record 自录数据积累 + trade5m 接 recorder（2.6） |
 
-### 结算模拟三级源
+### 回测结论档案（四轮实验，费后口径）
 
-windows 表实盘结果 > Gamma 回填 > 按 settlement-rule.md 钉死的规则从录制 TWAP 推导（推导启用前先对 ~20 个已回填窗口验证一致）。
-
----
-
-## 七、阶段 4：风控最小集（与 1–3 并行，放量前必须完成）
-
-`risk/gates.py`，所有 live 下单过闸：
-
-- [ ] 单窗口名义上限 / 单日累计投入上限 / 单日已实现亏损熔断；
-- [ ] 下单前余额检查；每窗口频率限制（防回执异常重复下单）；
-- [ ] **[v1.1 新增] POL（gas）余额低于阈值告警**——否则 redeem 会某天因没 gas 静默失败，"已实现 PnL"与"待赎回仓位"对不上账；
-- [ ] Kill switch：`runtime/KILL` 文件存在 → 拒新仓。
-
-Prometheus / Grafana / Telegram 后移（现阶段 structlog + 文件日志够用）。
+| 实验 | 结论 | 证据 |
+|---|---|---|
+| 基线全量 | BTC 每笔 -$0.47 / ETH -$0.28；名义胜率 31~34% > 隐含胜率 28~29%，止盈 0.65 截获上限 + 手续费吃光毛优势 | backtest-report（早期） |
+| 60 组网格 + walk-forward | 验证段无一组转正；tp=0.99（持有到结算）方向最优，仍是"亏得最少" | grid_runs.csv |
+| 27 组止损扫描 | 83% 持仓触发止损且全部更差 → 止损假设证伪，stop_loss_price 默认 0 | grid_runs.csv |
+| b07 max_vol 现货过滤 | BTC 减亏 54%（基线 -$2,479.86 → mv20/until=100：-$720.02，过滤 59% 窗口）；ETH 未触发（-$777.10 不变，TWAP60 波幅占比 0.5% 极少超 $20）；合计 -$1,497.12 | backtest-report-b07.md |
+| **根因** | 冷门方入场均价 ~0.27，盈亏平衡胜率需 27%，实际 23.5~25.1%；**定价劣势 2~4 个点，非执行/调参问题** | 各报告汇总 |
 
 ---
 
-## 八、阶段 5：参数扫描 + 持续一致性回归
+## 六、阶段 4：风控最小集（⬜ 0/4，放量硬前提）
 
-1. **样本量优先**：pm-record 24/7 积累 + pm-backfill 放大历史结算样本。先产出每日胜率/EV 报表与置信区间（p=0.5±0.05 需 ~384 入场样本，已验算），让"是否正 EV"有统计答案；
-2. **参数网格 + walk-forward**：ENTRY_AFTER/UNTIL、MAX_VOL、MIN/MAX_ENTRY、TAKE_PROFIT_PRICE；前 70% 调参、后 30% 验证（或滚动窗口）；报告敏感性曲线而非单点最优；结果落 backtest_runs 表。**清醒认知**：策略结构性负期望，小样本网格搜索极易拟合噪声——回测好看 ≠ 放大仓位；
-3. **持续一致性回归**：每次实盘跑都留录制数据，定期用新鲜实盘数据重放回测引擎，核对决策与线上日志一致，防长期漂移。
+`risk/gates.py`（待建），所有 live 下单过闸；`risk/` 当前为空壳。
 
----
+| 子项 | 内容 | 完成判据 |
+|---|---|---|
+| 4.1 限额与熔断 | 单窗口名义上限 / 单日累计投入上限 / 单日已实现亏损熔断 | 超限拒单 + 日志；单测覆盖边界 |
+| 4.2 余额检查 | 下单前 USDC 余额 ≥ 名义 + 费；每窗口频率限制（防回执异常重复下单） | 余额不足拒单；单测 |
+| 4.3 POL gas 告警 | gas 余额低于阈值告警（防 redeem 静默失败导致"已实现 PnL"与"待赎回仓位"对不上账） | 阈值可配；触发告警日志 |
+| 4.4 Kill Switch | `runtime/KILL` 文件存在 → 拒新仓 | 落文件即生效；单测 |
 
-## 九、对原规划（PROJECT_PLAN.md）的修订
-
-| 原规划 | 修订 |
-|---|---|
-| ClickHouse/TimescaleDB 存 tick | JSONL + SQLite（单日 ~100MB 量级） |
-| "WS 快照+增量、序列号校验"架构假设 | 实测 price_change 增量恒为 0（待原始帧验证确认），按快照节奏回放，撮合取保守口径 |
-| 阶段 4 风控整体后置 | 拆最小集提前（熔断/限额/余额/gas 告警），观测栈后移 |
-| "不要预测方向"套利纪律 | 已有意转向方向性投机——小仓位（$2/窗）+ 单日限额 + 熔断补偿，README 显式声明 |
-| 阶段 5/6（NegRisk/跨平台/做市） | 降级远期可选，Strategy 抽象保持轻量 |
-| 新增 | 结算规则实证文档为回测前置条件；数据积累与开发并行 |
+口径：Prometheus / Grafana / Telegram 后移（现阶段 structlog + 文件日志够用）。
 
 ---
 
-## 十、关键文件清单
+## 七、阶段 5：参数扫描 + 特征工程 + 一致性回归（🔄 2/6，持续）
 
-| 文件 | 角色 |
-|---|---|
-| src/pm_arb/app/trade5m.py | 拆分对象（580 行） |
-| src/pm_arb/execution/clob_trader.py | place_market（4d0fc18 重写版）+ size=0 误判修复点 |
-| src/pm_arb/execution/orders.py | apply_fill 的 FILLED/PARTIAL 判定（问题 4a） |
-| src/pm_arb/data/recorder.py | 孤儿录制器，pm-record 复活它 + 补 REST 快照/RTDS/连接事件路径 |
-| src/pm_arb/data/rtds.py | TWAP 流（on_update 钩子挂录制；base 语义待结算规则实证后修正） |
-| src/pm_arb/data/ws.py | 补 WsReconnect/WsIdleTimeout 事件回调（供录制） |
-| src/pm_arb/execution/paper.py | dry-run/回测共用成交模型（扩展市价/结算/保守单档撮合） |
-| src/pm_arb/execution/chain.py | redeem 已实现，待接线 |
+| 子项 | 状态 | 内容 |
+|---|---|---|
+| 5.1 样本量与每日报表 | 🔄 持续 | pm-record 24/7 积累 + pm-backfill 放大结算样本；每日胜率/EV 报表与置信区间（p=0.5±0.05 需 ~384 入场样本） |
+| 5.2 参数网格 + walk-forward | ✅ 首轮完成 | 见 3.2；**结论：价格/波动/止盈/止损参数平面内无解**，同平面继续微调不再投入 |
+| 5.3 特征工程（新信息维度） | ⬜ 未开始 | 见 5.3 详表 |
+| 5.4 人工判断信号系统化 | ⬜ 未开始 | 见 5.4 |
+| 5.5 验证标准与数据口径 | ⬜ 待执行纪律 | 见 5.5 |
+| 5.6 一致性回归 | 🔄 持续 | 每次实盘留录制数据，定期重放核对引擎与线上决策一致（依赖 2.6、3.4） |
+
+### 5.3 特征工程：从参数平面转向新信息维度（v1.5 新增）
+
+候选特征（作为 `decide_entry` 的额外过滤条件，类似 max_vol 现有角色）：
+
+| # | 特征 | 说明 | 假设 | 优先级 |
+|---|---|---|---|---|
+| F1 | Chainlink 更新频率 | 心跳 vs 真实价格更新 | 喂价卡死造成假低波动读数——crypto_5m_underdog.md 自认最脆弱假设 | **P0 先做** |
+| F2 | 盘口失衡 | 冷门方/热门方 `(bid_size−ask_size)/(bid_size+ask_size)` | 短期买卖压力；LocalOrderBook 已有档深，改造成本低 | P1 |
+| F3 | TWAP 短窗斜率 | 最近 10–30s 价格变化率（一阶导） | 比 high-low range 更反映"现在还在往哪边冲" | P1 |
+| F4 | TWAP 二阶导 | 斜率是否放缓/反转 | 趋势衰竭常是均值回归前置信号 | P2 |
+| F5 | 价差/流动性质量 | 冷门方 bid-ask 宽度 + 深度 | 宽价差可能是流动性噪声造成的假信号 | P2 |
+| F6 | 跨币种联动 | 同窗口 BTC/ETH 结果相关性 | 同一宏观驱动互为先验；现成 HF 数据即可检验 | P2 |
+| F7 | 时段效应 | 亚洲/欧美时段流动性与基线波动差异 | 分桶 + 单调性方法论直接复用 | P3 |
+| F8 | 连续窗口自相关 | 上一窗口方向/幅度是否预示下一窗口 | 检验"动量延续 vs 均值回归" | P3 |
+
+**工程落地**：新增 `strategies/crypto_5m/features.py`（与 decisions.py 平级的纯函数模块，无 I/O、无时钟，实盘/回测共用）；回测引擎落盘"入场时刻特征向量 + 结算结果"（CSV/SQLite，必要时补建 backtest_runs 表）；方法论沿用单变量分桶 + 单调性检验，单变量不够用时才考虑逻辑回归级打分模型，仍走 70/30 train/val 纪律。
+
+### 5.4 人工判断信号系统化记录（v1.5 新增）
+
+人工判断胜率高于机械规则说明 decisions.py 未编码全部可用信息。行动：① 每次人工进/不进判断**之前**用固定格式记录依据信号（结构化标签，事前记录而非事后回忆）；② 积累到统计口径一致样本量（~384 笔）再下结论，警惕小样本与记忆偏差；③ 有效标签逐条转为可计算特征，拿 HF 历史 + pm-record 实盘数据回测验证后再写进 decisions.py。
+
+### 5.5 验证标准与数据口径（v1.5 新增）
+
+- **采纳及格线**：新过滤器在验证段（后 30%，从未参与筛选）名义胜率须**清晰超过**入场均价对应的盈亏平衡胜率（当前口径 ~27%），"比基线好"不算通过；
+- **先定清单再看结果**：候选特征清单固定后再看验证集，防 14,000+ 窗口上的多重检验过拟合；
+- **HF outcome 抽样扩量**：目前仅 30 窗口抽样核对（30/30 一致），任何新特征结论被当作定论前，抽样扩至数百窗口；
+- **实盘校准**：HF 数据集为 2026-03~05 历史微观结构，新特征阈值须经 pm-record 实盘数据交叉校准（方向可迁移、数值需实盘标定）。
+
+---
+
+## 八、阶段 6：工程卫生与治理（⬜ 0/6，v1.5 新增，v2.0 已逐项代码核实）
+
+| # | 事项 | 代码核查结论（2026-09-13） | 优先级 |
+|---|---|---|---|
+| 1 | 私钥改 `pydantic.SecretStr` | **属实**：config.py docstring 承诺 SecretStr，实际 `private_key: str = Field(repr=False)`（config.py:40） | 高 |
+| 2 | 仓库可见性确认 | **属实**：docs/conversations/README.md 称私有；若实际公开，重审会话记录与回测报告敏感内容 | 高 |
+| 3 | 最小 CI（push 跑 pytest + ruff） | **属实**：无 `.github/workflows/`；防重构悄悄破坏 decisions.py 单一真相来源 | 中 |
+| 4 | USDC 精度统一 | **属实**：redeem.py:76 硬编码 `10**6`；chain.py 动态查询 `usdc_decimals`（chain.py:128-134） | 中 |
+| 5 | trade5m 接 TickRecorder | **属实**：trade5m.py 未 import recorder（同阶段 2.6 遗留，两处跟踪一处） | 中 |
+| 6 | README 目录图同步 | **属实**：README.md L44-47 仍写顶层 `backtest/`，实际已迁至 `strategies/crypto_5m/backtest/` | 低 |
+
+---
+
+## 九、对原规划（PROJECT_PLAN.md）的修订（汇总，含历史项）
+
+| 原规划 | 修订 | 状态 |
+|---|---|---|
+| ClickHouse/TimescaleDB 存 tick | JSONL + SQLite（单日 ~100MB 量级） | 已落地 |
+| "WS 快照+增量、序列号校验"架构假设 | 实测 price_change 增量恒为 0（原始帧验证），按快照节奏回放，撮合取保守口径 | 已落地 |
+| 阶段 4 风控整体后置 | 拆最小集提前（熔断/限额/余额/gas 告警），观测栈后移 | **仍未开始，放量硬前提** |
+| "不要预测方向"套利纪律 | 已有意转向方向性投机——小仓位（$2/窗）+ 单日限额 + 熔断补偿 | 已落地（README 声明） |
+| 阶段 5/6（NegRisk/跨平台/做市） | 降级远期可选，Strategy 抽象保持轻量 | 有效 |
+| backtest/ 顶层目录 | 实际收进策略包 `strategies/crypto_5m/backtest/`（`446a128`） | 已落地（README 未同步，见阶段 6 #6） |
+| backtest_runs 表留痕 | 未建；网格结果落 runtime/grid_runs.csv | v2.0 更正 |
+
+---
+
+## 十、关键文件清单（v2.0 按代码核实更新）
+
+| 文件 | 角色 | 状态 |
+|---|---|---|
+| strategies/crypto_5m/params.py | 参数单一来源（Crypto5mParams，--param k=v） | ✅ 现行 |
+| strategies/crypto_5m/decisions.py | 决策唯一来源（纯函数） | ✅ 现行 |
+| strategies/crypto_5m/context.py | WindowDataHub + 时钟注入 | ✅ 现行 |
+| strategies/crypto_5m/orchestrator.py | 窗口生命周期 + store 接线 + 结算守护 | ✅ 现行 |
+| strategies/crypto_5m/backtest/{engine,grid,hf_loader,spot_vol,run,report}.py | HF 回测全套 | ✅ 现行 |
+| execution/broker.py + clob_broker.py + paper_runner.py | Broker Protocol + live/paper 实现 | ✅ 现行 |
+| execution/orders.py | 订单状态机（含 size=0 修复） | ✅ 现行 |
+| execution/chain.py | 链上 ops（redeem 已实现，proxy 场景待 Safe 授权） | 🟡 部分 |
+| execution/clob_trader.py | CLOB 下单（place_market ref_price 版） | ✅ 现行 |
+| infra/store.py | SQLite 三表（orders/windows/positions） | ✅ 现行 |
+| infra/config.py | 集中配置（私钥 SecretStr 化待办） | 🟡 卫生项 |
+| data/recorder.py | JsonlWriter / TickRecorder | ✅ 现行 |
+| data/ticks_compact.py + app/compact.py | ticks 压实管线（JSONL→分区 Parquet，pm-compact，须 3.12 跑） | ✅ 现行 |
+| data/rtds.py / ws.py / feed.py | RTDS TWAP 流 / WS + 看门狗 / 数据订阅 | ✅ 现行 |
+| data/settlement.py | 结算纯函数 + 赎回守卫 | ✅ 现行 |
+| app/{trade5m,tui5m,record_ticks,redeem,backfill,doctor,setup,watch,crypto5m}.py | 9 个 CLI 入口（pm-trade5m / pm-record / pm-redeem / pm-backfill / pm-bt5m / pm-grid5m 等，见 pyproject） | ✅ 现行 |
+| risk/ 、 portfolio/ | 空壳（仅 __init__.py docstring） | ⬜ 阶段 4 |
+| strategies/crypto_5m/features.py | 特征纯函数模块 | ⬜ 阶段 5.3 |
 
 ---
 
@@ -255,3 +252,6 @@ Prometheus / Grafana / Telegram 后移（现阶段 structlog + 文件日志够�
 | 2026-09-12 | v1.2 | 阶段 0.1/0.2 完成：①结算规则钉死（Gamma 须 closed=true；578 窗口实证；taker fee 公式 fee=C×0.07×p×(1−p)，Crypto 仅 taker）→ docs/settlement-rule.md；②pm-record 上线挂机（三路流 + RestBook + 连接事件 + WindowMeta；原始帧证实无 price_change）；③附带修复：JsonlWriter 周期 flush、RTDS 业务级看门狗（空帧心跳/宽限期）；④环境：regex 包 DLL 损坏重装（镜像 403 走官方源） |
 | 2026-09-12 | v1.3 | 阶段 1 完成（A/B/C 三提交可精确 bisect）：A `504e6b2` 纯函数抽取；B `6f9198e` Broker Protocol + PaperBroker 市价撮合/结算（dry-run 换真实档深撮合——唯一行为改进点，按计划声明）；C orchestrator（WindowOrchestrator：对齐/引导/守卫/循环/清理，时钟注入 clock，SessionLog try/finally 关闭修句柄泄漏）+ trade5m 瘦 CLI（75 行，--param k=v 接 params 单一来源）+ 注册 pm-trade5m。另：回测收进策略包（pm-bt5m/pm-grid5m）、HF 数据集 60 组网格全负 EV（验证段），止盈 0.99 方向被 25k 样本证实但结构性负 EV 不变 |
 | 2026-09-12 | v1.4 | 阶段 2 完成：①infra/store.py（SQLite WAL，orders/windows/positions 三表，Decimal 存 TEXT，fill_ratio 不依赖 status——问题 4a 双保险纪律）；②Broker on_order 钩子接 orders 表（orchestrator._on_order，live/paper 共用）；③orchestrator 窗口/持仓行写入 + 平仓含出场 taker fee + 重启恢复（遗留持仓打印 + 结算守护接管）；④data/settlement.py（market_winner/settle_result/settle_key）+ orchestrator 后台结算守护（宽限期 360s）+ app/backfill.py（pm-backfill，--windows/--since 批量回填，无交易窗口也回填 market_winner 作回测样本放大器）；⑤赢单自动赎回仅 EOA 尝试，proxy 只记待赎（0.4 遗留不变）。验证：真实 Gamma 回填 29 窗口 + 预置持仓 lose 结算与手算一致；pytest 118/118。遗留：trade5m 接 recorder、proxy Safe 授权赎回 |
+| 2026-09-13 | v1.5 | 吸收外部分析报告（master@c53375b 评审）：①进展面板订正——报告称阶段 2 未开始系基于旧提交，实际 v1.4 已完成；②阶段 5 扩展：特征工程候选清单（8 项新信息维度，features.py 纯函数模块）、人工判断信号系统化记录、验证标准（验证段胜率须超盈亏平衡线 ~27%；HF outcome 抽样 30→数百；阈值实盘校准）；③新增工程卫生待办（SecretStr、仓库可见性、最小 CI、USDC 精度统一、recorder 接入、README 同步）；④重申风控最小集为放量硬前提 |
+| 2026-09-13 | v2.0 | 全文重构 + 逐条代码核查：①统一阶段结构（目标/交付物/完成判据/验证证据/遗留），子项颗粒度细化到 4–6 项/阶段并标完成度（0:4/4、1:5/5、2:4/6、3:3/4、4:0/4、5:2/6、6:0/6）；②事实更正：store.py 实际仅三表（backtest_runs 未建，网格结果落 runtime/grid_runs.csv）；回测包实际布局为 engine/grid/hf_loader/spot_vol/run/report（替代旧设想布局）；README L44-47 目录脱节属实；config.py:40 私钥为 str 属实；redeem.py:76 硬编码 10**6 属实；trade5m 未接 recorder 属实；无 .github/workflows 属实；③基线快照：params.py 现行默认值全量登记；pytest 118 项实测；runtime/logs 已 20 份；④回测结论档案化（四轮实验汇总表，含根因：盈亏平衡 27% vs 实际 23.5~25.1%）；⑤特征候选 F1–F8 排优先级（F1 Chainlink 更新频率 P0） |
+| 2026-09-13 | v2.1 | ticks 压实管线（b08）：①data/ticks_compact.py + app/compact.py（pm-compact）：已封口 market JSONL → date 分区 Parquet（book 行 = 全档展开 1480 万行/日，meta 行 = 小事件原样保 JSON），双重校验（parquet 行数 = 写出行数；事件数守恒）通过才删源；②实测压缩 25.1x（490MB→19.5MB/日，b08 实验先验证 28.1x）；③duckdb 依赖带 `python_version < '3.14'` marker（cp314 wheel DLL 损坏实测），pm-compact 须 3.12 运行；④pm-record 开机自启 + tkinter 监视器（启动文件夹 VBS，绿/橙/灰状态窗）；⑤测试基线 118→127 |
