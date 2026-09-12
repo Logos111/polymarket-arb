@@ -11,13 +11,13 @@
 
 | 阶段 | 内容 | 状态 | 备注 |
 |---|---|---|---|
-| 0.1 | 结算规则实证 → docs/settlement-rule.md | 🔄 进行中 | Gamma slug 查询已结算市场返回空，正在排查查询方式 |
-| 0.2 | pm-record 独立 24/7 录制脚本 | ⬜ 未开始 | **第一天上线，攒数据与开发并行** |
+| 0.1 | 结算规则实证 → docs/settlement-rule.md | ✅ 完成 | 规则钉死（TWAP≥起点价→Up）+ taker fee 公式确认；578 窗口实证 |
+| 0.2 | pm-record 独立 24/7 录制脚本 | ✅ 完成 | 已上线挂机，三路流非零；原始帧证实无 price_change |
 | 0.3 | 成交解析 bug（疑似已修）+ size=0 误判 FILLED | ⬜ 未开始 | 见下方修订说明 |
-| 0.4 | PnL 口径 + pm-redeem 赎回脚本 | ⬜ 未开始 | |
+| 0.4 | PnL 口径 + pm-redeem 赎回脚本 | ⬜ 未开始 | 3 笔待赎回仓位（09-11 实盘）可作首个实测对象 |
 | 1 | 模块化重构（决策纯函数） | ⬜ 未开始 | 提交拆分见 4.3 节 |
 | 2 | SQLite 结构层 + 结算回填 + 自动赎回 | ⬜ 未开始 | |
-| 3 | 回测引擎（17 份日志回放对账） | ⬜ 未开始 | |
+| 3 | 回测引擎（17 份日志回放对账） | ⬜ 未开始 | 撮合按快照回放（原始帧已证实） |
 | 4 | 风控最小集 | ⬜ 未开始 | 与 1–3 并行，放量前必须完成 |
 | 5 | 参数扫描（walk-forward）+ 一致性回归 | ⬜ 未开始 | 持续 |
 
@@ -78,24 +78,22 @@
 
 ## 三、阶段 0：结算规则实证 + bug 修复 + 录制脚本
 
-### 0.1 钉死结算规则（一切的地基）
+### 0.1 钉死结算规则（一切的地基）✅ 完成（2026-09-12）
 
-- [ ] 用 Gamma API 拉取一批**已结算的 5min 历史市场**（slug `{sym}-updown-5m-{ws}`），取 `outcome` / `outcomePrices` 拿每个窗口的真实结算方向，并读取市场 `description` 的规则原文。**已发现问题：按 slug 查已结算市场返回 `[]`，需先排查 Gamma 对 closed 市场的查询参数（closed=true 等）或归档机制**；
-- [ ] 用 Binance 5m K 线（data-api.binance.vision 公共端点）作窗口价格路径代理，交叉验证候选规则（如"窗口终点 TWAP > 窗口起点 TWAP"），统计一致率；
-- [ ] （pm-record 上线后）用录制的 RTDS full_accuracy_value 直接复核；
-- [ ] **[v1.1 新增] 确认 taker fee**：Polymarket CLOB 当前对 5m 市场是否收 taker fee（直接影响止盈 0.65 与结算 $1 的真实到手，否则回测 PnL 系统性偏乐观）。Gamma 市场字段或官方文档确认，写入 settlement-rule.md；
-- [ ] 产出 **docs/settlement-rule.md**：规则定义 + 验证方法 + N 个市场的实证一致率。规则钉死前，回测结算模拟一律标注"未验证"。
+- [x] 用 Gamma API 拉取**已结算的 5min 历史市场**：**卡点已解——查询必须带 `closed=true`**（不带/带 `false` 均返回空）；规则原文已从 description 一手核实写入 settlement-rule.md；
+- [x] 用 Binance 5m K 线交叉验证：578 窗口（btc+eth 24h），R_close 总一致率 84.6%，分歧集中于平坦窗口（<0.02% → 56.9%，≥0.5% → 100%），结构与交易所价差假设完全吻合；
+- [ ] （pm-record 上线后）用录制的 RTDS full_accuracy_value 直接复核 TWAP 数值与"起点价"口径；
+- [x] **确认 taker fee**：`fee = C × feeRate × p × (1−p)`，Crypto 类 feeRate=0.07，仅 taker 收费（官方 fees.md + Gamma feeSchedule 双源一致）；PnL 口径已写入 settlement-rule.md；
+- [x] 产出 **docs/settlement-rule.md**（v1.0）。回测结算标签一律以 Gamma outcomePrices 为权威，规则推导仅作无回填窗口的补充且按平坦度分桶标注置信度。
 
-### 0.2 独立 24/7 纯录制脚本（第一天上线）
+### 0.2 独立 24/7 纯录制脚本 ✅ 完成（2026-09-12 上线挂机）
 
-- [ ] 新增 `app/record_ticks.py`，注册 `pm-record`：复用现成 `RtdsTwapFeed` + `MarketDataFeed`（含 ws 空闲看门狗 / is_fresh 兜底），**不下单、不占资金**；
-- [ ] 落盘（JSONL 按天分片，append-only）：
-  - `runtime/ticks/{YYYY-MM-DD}_market.jsonl`：盘口 book 快照 + price_change 增量 + last_trade + **REST 回退快照**（新增 type:"RestBook"，补 REST 段数据洞）；
-  - `runtime/ticks/{YYYY-MM-DD}_rtds_{sym}.jsonl`：TWAP 逐笔（含 full_accuracy_value、seq）；
-  - **[v1.1 新增] WS 连接事件流**：`{"type":"WsReconnect","attempt":N,"delay":X}`、`{"type":"WsIdleTimeout",...}`——回测数据里要能回答"当时断流是网络/代理/订阅失效哪类问题"，成本几乎为零；
-- [ ] **[v1.1 新增] 原始 WS 消息抽样落盘**（上线第一天，至少留 1 小时）：把未解析的原始 WS 帧另存 `runtime/ticks/{date}_raw_ws.jsonl`，人工翻几条确认 `event_type` 字段本身是 `"book"` 而不是我们把 `"price_change"` 误分类——验证"增量恒为 0"是服务端行为而非解析 bug。若假设错了，阶段 3 撮合模型需重新设计，越早发现成本越低；
-- [ ] 窗口发现：循环 `get_window_market`，每窗口起止自动换订阅；窗口结束追加一条窗口元数据（slug/tokens/base）；
-- [ ] 挂服务器 24/7，覆盖不同时段（"亚洲凌晨/周末低波动"假设须用数据验证）。
+- [x] 新增 `app/record_ticks.py`，注册 `pm-record`：复用 `RtdsTwapFeed` + `MarketDataFeed`（含空闲看门狗 / is_fresh 兜底），不下单不占资金；
+- [x] 落盘三路流（按天分片 append-only）：`{date}_market.jsonl`（typed WS 事件 + **RestBook** + 连接事件 + WindowMeta）、`{date}_rtds_{sym}.jsonl`（原始 payload 含 full_accuracy_value）、`{date}_raw_ws.jsonl`（原始帧，默认全录可 `--raw-sample` 抽样，单帧截断 8KB）；
+- [x] WS 连接事件流：`WsReconnect`/`WsDisconnected` 落 market 流（feed 层 on_conn_event 钩子）；
+- [x] **原始帧验证完成**：2000 帧样本仅含 `book`(1378) + `last_trade_price`(642)，**无任何 price_change**——“增量恒 0 是服务端行为”假设成立，阶段 3 按快照回放的前提钉死；
+- [x] 附带修复两个录制可靠性问题：①JsonlWriter 每 50 行强制 flush（8KB 用户态缓冲可滞留数分钟，外部进程误判无数据）；②RTDS 业务级看门狗（服务端空帧心跳会喂饱链路层看门狗，订阅静默失效时需按业务时钟重连，且宽限期基线含连接时刻防重连风暴）；
+- [ ] 挂服务器 24/7 覆盖不同时段（当前挂本机，服务器迁移待定）；积累 24h 后检查数据完整性。
 
 ### 0.3 成交解析验证 + size=0 误判修复
 
@@ -252,3 +250,4 @@ Prometheus / Grafana / Telegram 后移（现阶段 structlog + 文件日志够�
 |---|---|---|
 | 2026-09-11 | v1.0 | 初版：两轮勘察 + 三项用户决策（SQLite / 统计+参数扫描 / 缺口全纳入） |
 | 2026-09-11 | v1.1 | 人工复核代码后的五点修订：①0.3 成交 bug 疑似已被 4d0fc18 修复（待验证后划掉）；②[新发现] order.size=0 导致 PARTIAL 误判 FILLED，纳入 0.3 + 阶段 2 落库纪律；③pm-record 增加原始 WS 帧抽样落盘（验证增量恒 0 是服务端行为）+ WS 连接事件流；④0.1 增加 taker fee 确认；⑤风控增加 POL gas 余额告警、阶段 1 提交拆分纪律（A 纯搬运/B 新行为/C 装配） |
+| 2026-09-12 | v1.2 | 阶段 0.1/0.2 完成：①结算规则钉死（Gamma 须 closed=true；578 窗口实证；taker fee 公式 fee=C×0.07×p×(1−p)，Crypto 仅 taker）→ docs/settlement-rule.md；②pm-record 上线挂机（三路流 + RestBook + 连接事件 + WindowMeta；原始帧证实无 price_change）；③附带修复：JsonlWriter 周期 flush、RTDS 业务级看门狗（空帧心跳/宽限期）；④环境：regex 包 DLL 损坏重装（镜像 403 走官方源） |
