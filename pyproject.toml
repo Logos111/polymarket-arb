@@ -16,6 +16,8 @@ dependencies = [
     "py-clob-client-v2>=1.1.0",
     "huggingface-hub>=1.31.0",
     "pyarrow>=25.0.1",
+    "tzdata>=2026.3",
+    "numpy>=2.5.3",
 ]
 
 [project.scripts]
