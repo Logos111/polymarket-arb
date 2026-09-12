@@ -1,9 +1,12 @@
-"""HF 公开数据集回测 CLI（python -m pm_arb.backtest.hf_backtest）。
+"""HF 公开数据集回测 CLI（一键：``pm-bt5m``）。
 
 用法（仓库根目录）::
 
-    python -m pm_arb.backtest.hf_backtest --symbols btc,eth
-    python -m pm_arb.backtest.hf_backtest --symbols btc --limit 50   # 冒烟
+    pm-bt5m                                     # btc+eth 全量
+    pm-bt5m --symbols btc --limit 50            # 冒烟（秒出）
+    pm-bt5m --param take_profit_price=0.55      # 覆盖任意策略参数
+
+等价模块调用：``python -m pm_arb.strategies.crypto_5m.backtest.run``
 """
 
 from __future__ import annotations
@@ -11,10 +14,10 @@ from __future__ import annotations
 import argparse
 from decimal import Decimal, InvalidOperation
 
-from pm_arb.backtest.engine import run_backtest
-from pm_arb.backtest.hf_loader import HfDataset
-from pm_arb.backtest.report import print_report
-from pm_arb.strategies.crypto_5m.params import Crypto5mParams
+from ..params import Crypto5mParams
+from .engine import run_backtest
+from .hf_loader import HfDataset
+from .report import print_report
 
 NOTES = [
     "数据集固定窗口 2026-03-24 → 2026-05-18，非活数据，微结构可能与当前不同；",

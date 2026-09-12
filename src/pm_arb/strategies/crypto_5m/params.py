@@ -19,7 +19,7 @@ class Crypto5mParams(BaseModel):
     target_notional: Decimal = Decimal("2.00")  # 单笔名义金额（美元）
     entry_after: int = 70                       # 开窗后 70s 起可入场（剩余 3:50）
     entry_until: int = 135                      # 开窗后 135s 后不再入场（剩余 2:45）
-    take_profit_price: Decimal = Decimal("0.65")  # 固定止盈价（与入场价无关）
+    take_profit_price: Decimal = Decimal("0.99")  # 固定止盈价（与入场价无关）
     max_entry: Decimal = Decimal("0.30")        # 冷门方入场价上限（30 点）
     min_entry: Decimal = Decimal("0.15")        # 入场价下限：过冷说明市场已大致
                                                 # 定局，买入近乎拾彩票，不入场

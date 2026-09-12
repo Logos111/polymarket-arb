@@ -23,14 +23,14 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
 
-from pm_arb.backtest.hf_loader import HfDataset, HfMarket, d2, s2
-from pm_arb.strategies.crypto_5m.decisions import (
+from ..decisions import (
     EntryAction,
     decide_entry,
     decide_exit,
     pick_underdog,
 )
-from pm_arb.strategies.crypto_5m.params import Crypto5mParams
+from ..params import Crypto5mParams
+from .hf_loader import HfDataset, HfMarket, d2, s2
 
 FEE_RATE = Decimal("0.07")  # Crypto 类 taker feeRate（双源确认）
 
@@ -67,22 +67,18 @@ class WindowResult:
     reasons: list[str] = field(default_factory=list)
 
 
-def replay_window(
-    ds: HfDataset, mkt: HfMarket, p: Crypto5mParams, *, min_size: int = 5
+def replay_ticks(
+    ticks: list[dict], mkt: HfMarket, p: Crypto5mParams, *, min_size: int = 5
 ) -> WindowResult:
-    """单窗口秒级回放（虚拟时钟，复用实盘判定函数）。"""
+    """单窗口秒级回放核心（tick 列表可跨参数组共享，网格扫描用）。"""
     res = WindowResult(
-        symbol=ds.symbol, slug=mkt.slug, outcome=mkt.outcome,
+        symbol="", slug=mkt.slug, outcome=mkt.outcome,
         exit_kind=ExitKind.NO_ENTRY,
     )
-    if not ds.has_ticks(mkt.condition_id):
-        res.reasons.append("no_ticks")
-        return res
-
     rng = Decimal(0)  # 数据集无 TWAP，波动过滤关闭
     position = None   # (cand, entry_ask, size, entry_t)
 
-    for tick in ds.window_ticks(mkt.condition_id):
+    for tick in ticks:
         elapsed = tick["t"] - mkt.start
         book = {
             "Up": {"best_ask": d2(tick["au"]), "best_bid": d2(tick["bu"]),
@@ -136,6 +132,15 @@ def replay_window(
     return res
 
 
+def replay_window(
+    ds: HfDataset, mkt: HfMarket, p: Crypto5mParams, *, min_size: int = 5
+) -> WindowResult:
+    """单窗口回放（HfDataset 门面；网格扫描直接用 replay_ticks）。"""
+    res = replay_ticks(ds.window_ticks(mkt.condition_id), mkt, p, min_size=min_size)
+    res.symbol = ds.symbol
+    return res
+
+
 def run_backtest(
     ds: HfDataset,
     p: Crypto5mParams | None = None,
@@ -151,4 +156,25 @@ def run_backtest(
         if mkt.outcome not in ("Up", "Down"):
             continue
         results.append(replay_window(ds, mkt, p, min_size=min_size))
+    return results
+
+
+def run_grid(
+    ds: HfDataset,
+    params_list: list[Crypto5mParams],
+    *,
+    min_size: int = 5,
+) -> list[list[WindowResult]]:
+    """网格扫描：每窗口 tick 构造一次，逐参数组回放（单遍数据多组共享）。"""
+    results: list[list[WindowResult]] = [[] for _ in params_list]
+    for mkt in ds.markets:
+        if mkt.outcome not in ("Up", "Down"):
+            continue
+        if not ds.has_ticks(mkt.condition_id):
+            continue
+        ticks = ds.window_ticks(mkt.condition_id)  # 每窗口只构造一次
+        for i, p in enumerate(params_list):
+            r = replay_ticks(ticks, mkt, p, min_size=min_size)
+            r.symbol = ds.symbol
+            results[i].append(r)
     return results

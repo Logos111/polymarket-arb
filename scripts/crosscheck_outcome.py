@@ -15,8 +15,8 @@ import argparse
 import asyncio
 import random
 
-from pm_arb.backtest.hf_loader import HfDataset
 from pm_arb.data.gamma import GammaClient
+from pm_arb.strategies.crypto_5m.backtest.hf_loader import HfDataset
 
 
 def gamma_winner(prices: list[str], outcomes: list[str]) -> str | None:

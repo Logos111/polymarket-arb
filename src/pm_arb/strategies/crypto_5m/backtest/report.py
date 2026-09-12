@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from decimal import Decimal
 
-from pm_arb.backtest.engine import ExitKind, WindowResult
+from .engine import ExitKind, WindowResult
 
 
 def print_report(results: list[WindowResult], *, skipped_no_outcome: int, notes: list[str]) -> None:

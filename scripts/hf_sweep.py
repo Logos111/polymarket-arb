@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from pm_arb.backtest.engine import ExitKind, run_backtest
-from pm_arb.backtest.hf_loader import HfDataset
+from pm_arb.strategies.crypto_5m.backtest.engine import ExitKind, run_backtest
+from pm_arb.strategies.crypto_5m.backtest.hf_loader import HfDataset
 from pm_arb.strategies.crypto_5m.params import Crypto5mParams
 
 BASE = Crypto5mParams()

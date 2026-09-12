@@ -24,7 +24,7 @@ P = Crypto5mParams()
 def test_params_defaults():
     assert P.target_notional == Decimal("2.00")
     assert (P.entry_after, P.entry_until) == (70, 135)
-    assert P.take_profit_price == Decimal("0.65")
+    assert P.take_profit_price == Decimal("0.99")
     assert (P.min_entry, P.max_entry) == (Decimal("0.15"), Decimal("0.30"))
     assert P.max_vol == Decimal("30")
     assert (P.poll, P.ws_fresh_sec, P.feed_fresh_sec, P.end_margin) == (2.0, 10.0, 15.0, 60)
@@ -111,14 +111,14 @@ def test_decide_entry_enter():
     assert d.action is EntryAction.ENTER
     assert d.size == 8  # ceil(2.00/0.280)=8
     assert d.log == ("[入场检查] ✅ Up ask= 0.280（档深461份） 波动$24.61"
-                     " → 市价买 ≈ $2.00，止盈  0.650")
+                     " → 市价买 ≈ $2.00，止盈  0.990")
 
 
 # ---- decide_exit ----
 
 def test_decide_exit_threshold():
-    assert not decide_exit(Decimal("0.64"), P)
-    assert decide_exit(Decimal("0.65"), P)
+    assert not decide_exit(Decimal("0.98"), P)
+    assert decide_exit(Decimal("0.99"), P)
     assert not decide_exit(None, P)
 
 

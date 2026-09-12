@@ -2,11 +2,14 @@
 
 from decimal import Decimal
 
-from pm_arb.backtest.engine import ExitKind, replay_window, taker_fee
-from pm_arb.backtest.hf_loader import HfMarket
+from pm_arb.strategies.crypto_5m.backtest.engine import ExitKind, replay_window, taker_fee
+from pm_arb.strategies.crypto_5m.backtest.hf_loader import HfMarket
 from pm_arb.strategies.crypto_5m.params import Crypto5mParams
 
-P = Crypto5mParams()
+# 显式锚定参数：不随 params.py 默认值漂移（实盘默认 take_profit 已改 0.99）
+P = Crypto5mParams(entry_after=70, entry_until=135,
+                   take_profit_price=Decimal("0.65"),
+                   min_entry=Decimal("0.15"), max_entry=Decimal("0.30"))
 CID = "0xabc"
 START = 1_800_000_000
 

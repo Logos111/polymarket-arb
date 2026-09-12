@@ -27,6 +27,8 @@ pm-watch = "pm_arb.app.watch:main"
 pm-crypto5m = "pm_arb.app.crypto5m:main"
 pm-record = "pm_arb.app.record_ticks:main"
 pm-redeem = "pm_arb.app.redeem:main"
+pm-bt5m = "pm_arb.strategies.crypto_5m.backtest.run:main"
+pm-grid5m = "pm_arb.strategies.crypto_5m.backtest.grid:main"
 
 [dependency-groups]
 dev = [
