@@ -65,6 +65,7 @@ class RtdsTwapFeed:
         *,
         window_seconds: int = 60,
         idle_timeout: float = 15.0,
+        on_raw: Callable[[dict], None] | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self.pair = f"{symbol.lower()}/usd"
@@ -75,6 +76,9 @@ class RtdsTwapFeed:
         # TWAP 流约每秒推一条；空闲看门狗阈值远大于正常间隔，
         # 触发即说明订阅静默失效，主动断开重连
         self._idle_timeout = idle_timeout
+        # 每条目标交易对的原始 payload 回调（含 full_accuracy_value/seq），
+        # 供 pm-record 落盘 RTDS 流；同步回调，异常不得阻断数据流
+        self._on_raw = on_raw
 
         # ---- 状态（上层读取）----
         self.last: Decimal | None = None
@@ -86,6 +90,7 @@ class RtdsTwapFeed:
         self.errors = 0
         self.seq = 0  # 收到的更新条数（单调递增，供探针展示活跃度）
         self._last_update = 0.0  # 单调时钟；0 表示从未收到
+        self._conn_at = 0.0  # 本次连接建立时刻（业务看门狗宽限期基线）
 
     # ---- 只读访问 ----
 
@@ -130,6 +135,11 @@ class RtdsTwapFeed:
             payload = data.get("payload") or {}
             if payload.get("symbol") != self.pair:
                 return None
+            if self._on_raw is not None:
+                try:
+                    self._on_raw(data)
+                except Exception as e:  # 录制失败不阻断行情流
+                    log.warning("rtds_raw_sink_error", error=str(e)[:80])
             # 优先 E18 定点精确值（结算口径），缺失时退回展示值
             fav = payload.get("full_accuracy_value")
             if fav is not None:
@@ -189,6 +199,7 @@ class RtdsTwapFeed:
                     await ws.send(json.dumps(sub))
                     log.info("rtds_connected", url=self._url, pair=self.pair,
                              window=self._topic)
+                    self._conn_at = time.monotonic()
                     attempt = 0
 
                     ping = asyncio.create_task(self._ping_loop(ws))
@@ -202,6 +213,17 @@ class RtdsTwapFeed:
                                             action="reconnect")
                                 break
                             price = self._handle_message(raw)
+                            # 业务级看门狗：链路有帧（如服务端周期性空帧心跳）
+                            # 但长期无有效 update → 订阅静默失效，同样重连。
+                            # 教训一：空帧会喂饱链路层看门狗，必须另看业务时钟；
+                            # 教训二：新连接 age()=+inf，宽限期基线必须含连接
+                            # 时刻，否则首条空帧就触发重连风暴，永远收不到数据。
+                            baseline = max(self._last_update, self._conn_at)
+                            if price is None and time.monotonic() - baseline > self._idle_timeout:
+                                log.warning("rtds_stale_but_alive",
+                                            idle=self._idle_timeout, action="reconnect",
+                                            note="frames arriving but no valid update")
+                                break
                             if price is not None and on_update is not None:
                                 res = on_update()
                                 if asyncio.iscoroutine(res):

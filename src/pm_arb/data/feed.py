@@ -30,6 +30,7 @@ log = get_logger(__name__)
 
 BookCallback = Callable[[str, LocalOrderBook], Awaitable[None] | None]
 TradeCallback = Callable[[WsLastTrade], Awaitable[None] | None]
+ConnEventCallback = Callable[[str, dict], Awaitable[None] | None]
 
 
 class MarketDataFeed:
@@ -42,6 +43,8 @@ class MarketDataFeed:
         recorder: TickRecorder | None = None,
         on_book: BookCallback | None = None,
         on_trade: TradeCallback | None = None,
+        on_conn_event: ConnEventCallback | None = None,
+        on_raw_frame: Callable[[str], None] | None = None,
     ):
         self.asset_ids = list(asset_ids)
         self._rest = rest
@@ -50,6 +53,11 @@ class MarketDataFeed:
         self._recorder = recorder
         self.on_book = on_book
         self.on_trade = on_trade
+        # 连接事件（WsConnected/WsReconnect/WsIdleTimeout/WsDisconnected），
+        # 供 pm-record 落盘：回测数据要能回答“断流是网络/代理/订阅失效哪类问题”
+        self.on_conn_event = on_conn_event
+        # 原始 WS 帧同步回调（解析前），供 pm-record 抽样落盘
+        self.on_raw_frame = on_raw_frame
 
         self._books: dict[str, LocalOrderBook] = {a: LocalOrderBook(a) for a in self.asset_ids}
         self._snapshot_lock = asyncio.Lock()
@@ -71,6 +79,15 @@ class MarketDataFeed:
                     book = await self._rest.get_book(asset_id)  # type: ignore[union-attr]
                     ob = self._books[asset_id]
                     ob.apply_snapshot(book)
+                    # REST 快照也落盘（type:RestBook）：补 WS 断连段的数据洞，
+                    # 回测撮合时按快照节奏回放
+                    if self._recorder is not None:
+                        try:
+                            self._recorder.record_raw(
+                                "RestBook", {"event": book.model_dump(mode="json")}
+                            )
+                        except Exception as e:
+                            log.warning("feed_restbook_record_failed", error=str(e)[:80])
                     await self._notify_book(asset_id, ob)
                 except Exception as e:
                     log.warning("feed_snapshot_failed", token=asset_id[:10], error=str(e)[:100])
@@ -98,19 +115,31 @@ class MarketDataFeed:
         # 启动即先拉一次快照，不等 WS 的 book 消息（降低启动后空窗）
         await self._rest_snapshot_all()
 
+        def _emit_conn(etype: str, **extra: object) -> None:
+            if self.on_conn_event is not None:
+                try:
+                    self.on_conn_event(etype, extra)
+                except Exception as e:
+                    log.warning("feed_conn_event_sink_error", error=str(e)[:80])
+
         async def _on_reconnect() -> None:
             # 重连后重拉快照；随后到达的 WS book 消息会再次覆盖
+            _emit_conn("WsReconnect")
             await self._rest_snapshot_all()
 
         def _on_disconnect() -> None:
             # 断连/看门狗超时：立即把本地簿置为未就绪，使上层马上回退 REST，
             # 而不是硬扛一份可能已冻结的旧盘口（补救 ready 单向锁）
+            _emit_conn("WsDisconnected")
             for ob in self._books.values():
                 ob.invalidate()
             log.info("feed_books_invalidated", assets=len(self._books))
 
         stream = self._ws.stream(
-            self.asset_ids, on_reconnected=_on_reconnect, on_disconnected=_on_disconnect
+            self.asset_ids,
+            on_reconnected=_on_reconnect,
+            on_disconnected=_on_disconnect,
+            on_raw_frame=self.on_raw_frame,
         )
         try:
             async for event in stream:

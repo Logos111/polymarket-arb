@@ -88,7 +88,9 @@ class GammaClient:
             return None
         return Market.model_validate(data[0])
 
-    async def get_liquid_markets(self, min_liquidity: float = 10_000, limit: int = 50) -> list[Market]:
+    async def get_liquid_markets(
+        self, min_liquidity: float = 10_000, limit: int = 50
+    ) -> list[Market]:
         """流动性过滤：套利只参与盘口厚度足够的市场。"""
         markets = await self.get_markets(limit=limit)
         from decimal import Decimal

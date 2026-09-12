@@ -21,6 +21,7 @@ pm-doctor = "pm_arb.app.doctor:main"
 pm-setup = "pm_arb.app.setup:main"
 pm-watch = "pm_arb.app.watch:main"
 pm-crypto5m = "pm_arb.app.crypto5m:main"
+pm-record = "pm_arb.app.record_ticks:main"
 
 [dependency-groups]
 dev = [

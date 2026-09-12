@@ -129,7 +129,8 @@ class MarketWsClient:
         asset_ids: list[str],
         *,
         on_reconnected: Callable[[], Awaitable[None] | None] | None = None,
-        on_disconnected: Callable[[], Awaitable[None] | None] | None = None,
+        on_disconnected: Callable[[], Awaitable[None] | None] = None,
+        on_raw_frame: Callable[[str], None] | None = None,
     ) -> AsyncIterator[WsEvent]:
         """订阅 asset_ids 并无限产出事件；连接断开/静默失效自动重连。
 
@@ -137,6 +138,8 @@ class MarketWsClient:
         REST 快照，防止重连间隙丢失增量。
         ``on_disconnected``：断连或空闲看门狗超时后回调，feed 层借此把本地
         簿置为未就绪，使上层立即回退 REST 而非硬扛冻结盘口。
+        ``on_raw_frame``：每条原始 WS 文本帧的同步回调（解析前调用），
+        供 pm-record 抽样落盘原始帧，验证 event_type 分类是服务端行为。
         """
         attempt = 0
         idle_timeout = self._settings.ws_idle_timeout
@@ -169,6 +172,11 @@ class MarketWsClient:
                             await _fire(on_disconnected)
                             break
                         for event in parse_message(raw):
+                            if on_raw_frame is not None and isinstance(raw, str):
+                                try:
+                                    on_raw_frame(raw)
+                                except Exception as e:  # 录制失败不阻断行情流
+                                    log.warning("ws_raw_frame_sink_error", error=str(e)[:80])
                             yield event
 
             except (ConnectionClosed, OSError, TimeoutError) as e:
