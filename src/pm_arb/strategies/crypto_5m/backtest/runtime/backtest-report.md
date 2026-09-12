@@ -3,7 +3,8 @@
 > 生成日期：2026-09-12
 > 数据：HF 公开数据集 `kachoio/polymarket-5-minute-crypto-up-down-markets`（CC0），btc + eth
 > 代码：`fd1496d`（引擎）→ `446a128`（搬入策略包）→ 判定/参数与实盘同源（`d432e04`）
-> 复现：`pm-bt5m`（单组基线）｜`pm-grid5m`（网格扫描）｜原始输出 `runtime/hf_backtest_full.txt`、`runtime/grid_runs.csv`、`runtime/bt_best.txt`（2.1 最优全量）、`runtime/bt_sl_best.txt`（2.2 止损最优全量）、`runtime/grid_sl.txt`（3.4 排名）、`runtime/bt_b07_best.txt`（2.3 b07 最优全量）、`runtime/grid_b07.txt`（b07 排名）
+> 复现：`pm-bt5m`（单组基线）｜`pm-grid5m`（网格扫描）｜原始输出 `runtime/bt_b07_best.txt`（2.3 b07 最优全量）、`runtime/grid_b07.txt` + `runtime/grid_runs.csv`（b07 排名与明细）
+> 注：早期轮次原始输出（hf_backtest_full / grid_sl / bt_best / bt_sl_best 等）已清理——max_vol 未生效时期的数据无参考意义，数字以本报告表格为准
 
 ---
 
