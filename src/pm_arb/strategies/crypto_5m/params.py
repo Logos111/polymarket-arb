@@ -30,18 +30,25 @@ class Crypto5mParams(BaseModel):
     end_margin: int = 60                        # 结算前 N 秒停止操作
 
 
-def parse_overrides(items: list[str] | None) -> dict[str, Decimal]:
+def parse_overrides(items: list[str] | None) -> dict[str, Decimal | int]:
     """解析 ``--param k=v`` 列表为 model_copy(update=...) 字典（CLI 单一来源）。
 
     实盘 trade5m 与回测 run/grid 共用；非法格式直接 SystemExit。
+    int 字段（entry_after/entry_until 等）按 int 转换，避免 Decimal 传入
+    触发 pydantic 序列化告警。
     """
-    update: dict[str, Decimal] = {}
+    int_fields = {
+        k for k, f in Crypto5mParams.model_fields.items() if f.annotation is int
+    }
+    update: dict[str, Decimal | int] = {}
     for item in items or []:
         if "=" not in item:
             raise SystemExit(f"--param 格式应为 k=v：{item}")
         k, v = item.split("=", 1)
+        k = k.strip()
         try:
-            update[k.strip()] = Decimal(v.strip())
+            dv = Decimal(v.strip())
         except InvalidOperation:
             raise SystemExit(f"--param 值须为数字：{item}") from None
+        update[k] = int(dv) if k in int_fields else dv
     return update
