@@ -12,9 +12,8 @@
 from __future__ import annotations
 
 import argparse
-from decimal import Decimal, InvalidOperation
 
-from ..params import Crypto5mParams
+from ..params import Crypto5mParams, parse_overrides
 from .engine import run_backtest
 from .hf_loader import HfDataset
 from .report import print_report
@@ -28,18 +27,9 @@ NOTES = [
 ]
 
 
-def parse_overrides(items: list[str] | None) -> Crypto5mParams:
-    """--param take_profit_price=0.55 形式覆盖默认参数。"""
-    update: dict = {}
-    for item in items or []:
-        if "=" not in item:
-            raise SystemExit(f"--param 格式应为 k=v：{item}")
-        k, v = item.split("=", 1)
-        try:
-            update[k.strip()] = Decimal(v.strip())
-        except InvalidOperation:
-            raise SystemExit(f"--param 值须为数字：{item}") from None
-    return Crypto5mParams().model_copy(update=update)
+def parse_overrides_cli(items: list[str] | None) -> Crypto5mParams:
+    """--param k=v 覆盖默认参数（解析逻辑在 params.parse_overrides）。"""
+    return Crypto5mParams().model_copy(update=parse_overrides(items))
 
 
 def main() -> int:
@@ -51,7 +41,7 @@ def main() -> int:
                     metavar="K=V", help="覆盖策略参数（可多次）")
     args = ap.parse_args()
 
-    p = parse_overrides(args.param)
+    p = parse_overrides_cli(args.param)
     print(f"参数: {p.model_dump()}")
     for sym in [s.strip().lower() for s in args.symbols.split(",") if s.strip()]:
         ds = HfDataset(sym, args.parquet_dir)

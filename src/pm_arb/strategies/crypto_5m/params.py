@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from pydantic import BaseModel, ConfigDict
 
@@ -28,3 +28,20 @@ class Crypto5mParams(BaseModel):
     ws_fresh_sec: float = 10.0                  # WS 本地簿新鲜度阈值：超龄回退 REST
     feed_fresh_sec: float = 15.0                # RTDS TWAP 新鲜度阈值：超龄不可信
     end_margin: int = 60                        # 结算前 N 秒停止操作
+
+
+def parse_overrides(items: list[str] | None) -> dict[str, Decimal]:
+    """解析 ``--param k=v`` 列表为 model_copy(update=...) 字典（CLI 单一来源）。
+
+    实盘 trade5m 与回测 run/grid 共用；非法格式直接 SystemExit。
+    """
+    update: dict[str, Decimal] = {}
+    for item in items or []:
+        if "=" not in item:
+            raise SystemExit(f"--param 格式应为 k=v：{item}")
+        k, v = item.split("=", 1)
+        try:
+            update[k.strip()] = Decimal(v.strip())
+        except InvalidOperation:
+            raise SystemExit(f"--param 值须为数字：{item}") from None
+    return update

@@ -1,6 +1,6 @@
 # 开发计划与项目进程（活文档）
 
-> 版本：v1.1 ｜ 日期：2026-09-11
+> 版本：v1.3 ｜ 日期：2026-09-12
 > **本文档是项目的方向与进展跟踪文档，实施过程中随进度持续更新。**
 > 每完成一项：勾选 `[x]` 并在文末变更记录登记；发现新问题/新决策：修订对应章节并升级版本号。
 > 前置阅读：[PROJECT_PLAN.md](PROJECT_PLAN.md)（最初总体规划，本文修订其阶段 3 之后的路线）
@@ -15,9 +15,9 @@
 | 0.2 | pm-record 独立 24/7 录制脚本 | ✅ 完成 | 已上线挂机，三路流非零；原始帧证实无 price_change |
 | 0.3 | 成交解析 bug（疑似已修）+ size=0 误判 FILLED | ✅ 完成 | ref_price 估算目标份数；部分成交单测；打印统一 _fmt |
 | 0.4 | PnL 口径 + pm-redeem 赎回脚本 | ✅ 完成 | 两栏 PnL；dry-run 实测 4 笔仓位吻合；proxy 链上赎回留阶段 2 |
-| 1 | 模块化重构（决策纯函数） | ⬜ 未开始 | 提交拆分见 4.3 节 |
-| 2 | SQLite 结构层 + 结算回填 + 自动赎回 | ⬜ 未开始 | |
-| 3 | 回测引擎（17 份日志回放对账） | ⬜ 未开始 | 撮合按快照回放（原始帧已证实） |
+| 1 | 模块化重构（决策纯函数） | ✅ 完成 | A `504e6b2` / B `6f9198e` / C 见最新提交；拆分见 4.3 节 |
+| 2 | SQLite 结构层 + 结算回填 + 自动赎回 | ⬜ 未开始 | orders 表写入点已备好（Broker on_order 钩子） |
+| 3 | 回测引擎（17 份日志回放对账） | 🔄 提前交付 HF 版 | HF 公开数据集引擎+60 组扫描已提交（`fd1496d`）；17 份日志回放对账待自录数据 |
 | 4 | 风控最小集 | ⬜ 未开始 | 与 1–3 并行，放量前必须完成 |
 | 5 | 参数扫描（walk-forward）+ 一致性回归 | ⬜ 未开始 | 持续 |
 
@@ -253,3 +253,4 @@ Prometheus / Grafana / Telegram 后移（现阶段 structlog + 文件日志够�
 | 2026-09-11 | v1.0 | 初版：两轮勘察 + 三项用户决策（SQLite / 统计+参数扫描 / 缺口全纳入） |
 | 2026-09-11 | v1.1 | 人工复核代码后的五点修订：①0.3 成交 bug 疑似已被 4d0fc18 修复（待验证后划掉）；②[新发现] order.size=0 导致 PARTIAL 误判 FILLED，纳入 0.3 + 阶段 2 落库纪律；③pm-record 增加原始 WS 帧抽样落盘（验证增量恒 0 是服务端行为）+ WS 连接事件流；④0.1 增加 taker fee 确认；⑤风控增加 POL gas 余额告警、阶段 1 提交拆分纪律（A 纯搬运/B 新行为/C 装配） |
 | 2026-09-12 | v1.2 | 阶段 0.1/0.2 完成：①结算规则钉死（Gamma 须 closed=true；578 窗口实证；taker fee 公式 fee=C×0.07×p×(1−p)，Crypto 仅 taker）→ docs/settlement-rule.md；②pm-record 上线挂机（三路流 + RestBook + 连接事件 + WindowMeta；原始帧证实无 price_change）；③附带修复：JsonlWriter 周期 flush、RTDS 业务级看门狗（空帧心跳/宽限期）；④环境：regex 包 DLL 损坏重装（镜像 403 走官方源） |
+| 2026-09-12 | v1.3 | 阶段 1 完成（A/B/C 三提交可精确 bisect）：A `504e6b2` 纯函数抽取；B `6f9198e` Broker Protocol + PaperBroker 市价撮合/结算（dry-run 换真实档深撮合——唯一行为改进点，按计划声明）；C orchestrator（WindowOrchestrator：对齐/引导/守卫/循环/清理，时钟注入 clock，SessionLog try/finally 关闭修句柄泄漏）+ trade5m 瘦 CLI（75 行，--param k=v 接 params 单一来源）+ 注册 pm-trade5m。另：回测收进策略包（pm-bt5m/pm-grid5m）、HF 数据集 60 组网格全负 EV（验证段），止盈 0.99 方向被 25k 样本证实但结构性负 EV 不变 |
