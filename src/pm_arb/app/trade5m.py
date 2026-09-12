@@ -458,9 +458,11 @@ async def try_window(
 
                             # 信号成立即市价成交（FAK）：价格由 CLOB 按当前盘口
                             # 计算，彻底消除 FOK 限价被往返延迟内价格上移整单
-                            # 杀掉的问题（连续两窗实测）；BUY 按美元金额下单
+                            # 杀掉的问题（连续两窗实测）；BUY 按美元金额下单；
+                            # ref_price 用本地盘口 ask 估算目标份数，让
+                            # FILLED/PARTIAL 状态区分有意义（问题 4a）
                             order = await trader.place_market(
-                                token_id, Side.BUY, TARGET_NOTIONAL
+                                token_id, Side.BUY, TARGET_NOTIONAL, ref_price=ask
                             )
                             sl.line(f"买单: {order.status.value} {order.error or ''}", event=True)
                             if order.filled_size > 0 and order.status.value in (
@@ -473,7 +475,7 @@ async def try_window(
                                 st.update(pos_side=cand, pos_entry=entry_price, pos_filled=filled,
                                           tp_target=TAKE_PROFIT_PRICE)
                                 st["entry_status"] = f"已成交 {cand}"
-                                sl.line(f"成交: {filled:.4f} 份 @ {entry_price}"
+                                sl.line(f"成交: {filled:.4f} 份 @ {entry_price:.4f}"
                                         f"（≈${entry_price * filled:.2f}）",
                                         event=True)
                             else:
@@ -498,9 +500,10 @@ async def try_window(
                             from pm_arb.execution.orders import Side
 
                             # 止盈也用市价卖出（按持仓份数），避免 FOK 限价
-                            # 在快市中被杀导致止盈落空
+                            # 在快市中被杀导致止盈落空；ref_price=bb 供目标
+                            # 份数记录（SELL amount 本身即份数）
                             o = await trader.place_market(
-                                token_id, Side.SELL, filled
+                                token_id, Side.SELL, filled, ref_price=bb
                             )
                             sl.line(f"卖单: {o.status.value} {o.error or ''}", event=True)
                             if o.status.value in ("FILLED", "PARTIAL") and o.avg_fill_price:

@@ -160,23 +160,37 @@ class ClobTrader:
         *,
         order_type: OrderType = OrderType.FAK,
         neg_risk: bool = False,
+        ref_price: Decimal | None = None,
     ) -> Order:
         """下市价单（价格由 SDK 按当前盘口自动计算）。
 
         - BUY：amount 为美元金额；SELL：amount 为份额数；
         - 默认 FAK：能成交多少算多少，剩余取消——比 FOK 更贴近“市价成交”
           语义，不会被往返延迟内的价格上移整单杀掉；
-        - Order.price/size 初始为 0，成交后按回执换算实际份数与均价。
+        - ref_price：参考价（调用方从本地盘口取，如当前 ask/bid），用于
+          估算目标份数赋给 order.size，让 FILLED/PARTIAL 状态区分有
+          意义（问题 4a：size=0 时任何成交都会被判 FILLED）。SELL 的
+          amount 本身就是份数，无需估算。缺失时 size=0，行为同旧版：
+          成交即 FILLED（阶段 2 落库一律用 filled_size 与目标名义对比，
+          不依赖 status，双保险）。
         """
         from py_clob_client_v2.clob_types import MarketOrderArgs, PartialCreateOrderOptions
         from py_clob_client_v2.clob_types import OrderType as PyOrderType
+
+        # 目标份数估算：BUY 用参考价折算美元；SELL 直接取份数
+        if side is Side.SELL:
+            est_size = Decimal(amount)
+        elif ref_price and ref_price > 0:
+            est_size = Decimal(amount) / ref_price
+        else:
+            est_size = Decimal(0)
 
         order = Order(
             token_id=token_id,
             side=side,
             order_type=order_type,
-            price=Decimal(0),
-            size=Decimal(0),
+            price=ref_price or Decimal(0),
+            size=est_size,
         )
 
         def _do() -> dict:

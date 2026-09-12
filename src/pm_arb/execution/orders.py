@@ -98,7 +98,14 @@ class Order(BaseModel):
         self._transition(OrderStatus.SUBMITTED)
 
     def apply_fill(self, fill_size: Decimal, fill_price: Decimal) -> None:
-        """记录一笔成交。"""
+        """记录一笔成交。
+
+        FILLED 判定用 filled_size >= size：调用方必须保证市价单在下单前
+        已填入目标份数（如 place_market 的 ref_price 估算），否则 size=0
+        的订单任何成交都会被判 FILLED（问题 4a 的历史事故）。size=0
+        是“目标未知市价单”的兼容兑底：成交即视作 FILLED；阶段 2 落库
+        一律用 filled_size 与目标名义对比计算成交比例，不依赖 status。
+        """
         fill_size = Decimal(fill_size)
         if fill_size <= 0:
             return
