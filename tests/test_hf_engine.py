@@ -2,7 +2,12 @@
 
 from decimal import Decimal
 
-from pm_arb.strategies.crypto_5m.backtest.engine import ExitKind, replay_window, taker_fee
+from pm_arb.strategies.crypto_5m.backtest.engine import (
+    ExitKind,
+    replay_ticks,
+    replay_window,
+    taker_fee,
+)
 from pm_arb.strategies.crypto_5m.backtest.hf_loader import HfMarket
 from pm_arb.strategies.crypto_5m.params import Crypto5mParams
 
@@ -132,3 +137,32 @@ def test_stop_loss_depth_short_holds():
     ticks = [tick(80), tick(100, au=0.12, bu=0.10, su=2)]
     res = replay_window(FakeDS(ticks), mkt("Down"), PSL)
     assert res.exit_kind is ExitKind.SETTLE_LOSE
+
+
+# ---- 波动过滤（rng_seq 现货序列；b07）----
+
+def test_vol_filter_aborts_entry():
+    # rng_seq 全程超 max_vol=30 → ABORT_VOL 不入场（rng 单调不减，重复拒绝）
+    ticks = [tick(t) for t in range(80, 120)]
+    rng_seq = [Decimal("50")] * len(ticks)
+    res = replay_ticks(ticks, mkt("Up"), P, rng_seq=rng_seq)
+    assert res.exit_kind is ExitKind.NO_ENTRY
+    assert res.size == 0
+
+
+def test_vol_data_missing_aborts_entry():
+    # rng None（现货数据不全）→ ABORT_DATA 不入场（与实盘“数据不全”同口径）
+    ticks = [tick(t) for t in range(80, 120)]
+    rng_seq = [None] * len(ticks)
+    res = replay_ticks(ticks, mkt("Up"), P, rng_seq=rng_seq)
+    assert res.exit_kind is ExitKind.NO_ENTRY
+    assert res.size == 0
+
+
+def test_vol_below_threshold_enters():
+    # rng 低于 max_vol → 正常入场（与 rng=0 旧行为一致）
+    ticks = [tick(t) for t in range(80, 120)]
+    rng_seq = [Decimal("12.5")] * len(ticks)
+    res = replay_ticks(ticks, mkt("Up"), P, rng_seq=rng_seq)
+    assert res.exit_kind is ExitKind.SETTLE_WIN
+    assert res.size == 8

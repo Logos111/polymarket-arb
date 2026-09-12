@@ -17,13 +17,22 @@ from ..params import Crypto5mParams, parse_overrides
 from .engine import run_backtest
 from .hf_loader import HfDataset
 from .report import print_report
+from .spot_vol import SpotVol
 
 NOTES = [
     "数据集固定窗口 2026-03-24 → 2026-05-18，非活数据，微结构可能与当前不同；",
     "outcome 为数据集作者按窗口最后 tick bid 推断（非链上结算），结论以"
     " Gamma 交叉核对为准；",
-    "数据集无现货 TWAP：max_vol 波动过滤关闭（rng=0），与实盘行为有差异；",
+    "--spot 未开：无现货 TWAP，max_vol 波动过滤关闭（rng=0），与实盘行为有差异；",
     "撮合保守：入场/止盈均要求档深 ≥ 份数，否则放弃/继续持有。",
+]
+
+NOTES_SPOT = [
+    NOTES[0],
+    NOTES[1],
+    "现货波动为 Binance 1s K 线重建的滚动 60s TWAP high-low（收盘价均值近似；"
+    "单所现货 ≠ Chainlink 多所聚合，极端行情可能有偏差）；",
+    NOTES[3],
 ]
 
 
@@ -39,15 +48,19 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None, help="每币只回放前 N 窗口（冒烟）")
     ap.add_argument("--param", action="append", default=None,
                     metavar="K=V", help="覆盖策略参数（可多次）")
+    ap.add_argument("--spot", action="store_true",
+                    help="启用 b07 现货波动（需 runtime/hf/{sym}_spot_1s.parquet）")
     args = ap.parse_args()
 
     p = parse_overrides_cli(args.param)
     print(f"参数: {p.model_dump()}")
     for sym in [s.strip().lower() for s in args.symbols.split(",") if s.strip()]:
         ds = HfDataset(sym, args.parquet_dir)
+        spot = SpotVol(sym, args.parquet_dir) if args.spot else None
         skipped = sum(1 for m in ds.markets if m.outcome not in ("Up", "Down"))
-        results = run_backtest(ds, p, limit=args.limit)
-        print_report(results, skipped_no_outcome=skipped, notes=NOTES)
+        results = run_backtest(ds, p, limit=args.limit, spot=spot)
+        print_report(results, skipped_no_outcome=skipped,
+                     notes=NOTES_SPOT if args.spot else NOTES)
     return 0
 
 

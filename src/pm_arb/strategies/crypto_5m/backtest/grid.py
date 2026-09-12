@@ -27,16 +27,16 @@ from decimal import Decimal
 from ..params import Crypto5mParams
 from .engine import ExitKind, WindowResult, run_grid
 from .hf_loader import HfDataset
+from .spot_vol import SpotVol
 
 TRAIN_FRAC = 0.7
 
 # ── 网格定义（笛卡尔积；改这里即可调参）──────────────────────
-# 注意：max_vol 轴在本数据集无效（无现货 TWAP，引擎 rng 恒 0），
-# 仅占位——同 (sl, until) 下三档结果完全相同；生效需 Binance K 线代理（b07）。
+# b07 轮：max_vol 轴需 --spot（Binance 1s K 线重建滚动 60s TWAP）；
+# 止损已证伪固定关闭（stop_loss_price 默认 0），止盈/入场价带固定上轮最优。
 AXES: dict[str, list] = {
-    "stop_loss_price": [Decimal("0.05"), Decimal("0.10"), Decimal("0.15")],
-    "entry_until": [100, 135, 180],
     "max_vol": [Decimal("20"), Decimal("25"), Decimal("30")],
+    "entry_until": [100, 135, 180],
 }
 # 固定参数（不进网格）：入场价带与止盈取上轮 60 组扫描最优
 FIXED: dict[str, Decimal | int] = {
@@ -69,10 +69,11 @@ def _shards(items: list, n: int) -> list[list]:
     return out
 
 
-def _run_shard(symbol: str, params_shard: list[Crypto5mParams]):
+def _run_shard(symbol: str, params_shard: list[Crypto5mParams], use_spot: bool):
     """worker：加载数据一次，跑一片参数组。"""
     ds = HfDataset(symbol)
-    return symbol, run_grid(ds, params_shard)
+    spot = SpotVol(symbol) if use_spot else None
+    return symbol, run_grid(ds, params_shard, spot=spot)
 
 
 def _stats(results: list[WindowResult]) -> dict:
@@ -92,16 +93,19 @@ def _stats(results: list[WindowResult]) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description="HF 数据集网格扫描")
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--spot", action="store_true",
+                    help="启用 b07 现货波动（max_vol 轴生效；需 spot_1s.parquet）")
     args = ap.parse_args()
 
     params_list = grid_params()
-    print(f"网格 {len(params_list)} 组 × {len(SYMBOLS)} 币，workers={args.workers}")
+    print(f"网格 {len(params_list)} 组 × {len(SYMBOLS)} 币，workers={args.workers}"
+          f"{'，spot 波动开' if args.spot else ''}")
 
     # 多进程分片：每 worker 加载一次数据跑一组参数片；任务 (币, 片) 对应回填
     per_symbol: dict[str, list[list[WindowResult]]] = {}
     shard_lists = {s: _shards(params_list, args.workers) for s in SYMBOLS}
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
-        futs = {(s, i): ex.submit(_run_shard, s, sh)
+        futs = {(s, i): ex.submit(_run_shard, s, sh, args.spot)
                 for s in SYMBOLS for i, sh in enumerate(shard_lists[s])}
         for s in SYMBOLS:
             per_symbol[s] = [None] * len(params_list)

@@ -32,6 +32,7 @@ from ..decisions import (
 )
 from ..params import Crypto5mParams
 from .hf_loader import HfDataset, HfMarket, d2, s2
+from .spot_vol import SpotVol
 
 FEE_RATE = Decimal("0.07")  # Crypto 类 taker feeRate（双源确认）
 
@@ -70,18 +71,24 @@ class WindowResult:
 
 
 def replay_ticks(
-    ticks: list[dict], mkt: HfMarket, p: Crypto5mParams, *, min_size: int = 5
+    ticks: list[dict], mkt: HfMarket, p: Crypto5mParams, *,
+    min_size: int = 5, rng_seq: list[Decimal | None] | None = None,
 ) -> WindowResult:
-    """单窗口秒级回放核心（tick 列表可跨参数组共享，网格扫描用）。"""
+    """单窗口秒级回放核心（tick 列表可跨参数组共享，网格扫描用）。
+
+    ``rng_seq``：各 tick 秒的现货波动（b07 SpotVol 重建，与 ticks 等长）；
+    None 元素 = 现货数据不全（decide_entry 按 ABORT_DATA 放弃）；
+    不传 = 无现货数据，rng 恒 0（max_vol 过滤关闭，旧行为）。
+    """
     res = WindowResult(
         symbol="", slug=mkt.slug, outcome=mkt.outcome,
         exit_kind=ExitKind.NO_ENTRY,
     )
-    rng = Decimal(0)  # 数据集无 TWAP，波动过滤关闭
     position = None   # (cand, entry_ask, size, entry_t)
 
-    for tick in ticks:
+    for i, tick in enumerate(ticks):
         elapsed = tick["t"] - mkt.start
+        rng = rng_seq[i] if rng_seq is not None else Decimal(0)
         book = {
             "Up": {"best_ask": d2(tick["au"]), "best_bid": d2(tick["bu"]),
                    "ask_size": s2(tick["sau"]), "bid_size": s2(tick["su"])},
@@ -144,10 +151,16 @@ def replay_ticks(
 
 
 def replay_window(
-    ds: HfDataset, mkt: HfMarket, p: Crypto5mParams, *, min_size: int = 5
+    ds: HfDataset, mkt: HfMarket, p: Crypto5mParams, *,
+    min_size: int = 5, spot: SpotVol | None = None,
 ) -> WindowResult:
     """单窗口回放（HfDataset 门面；网格扫描直接用 replay_ticks）。"""
-    res = replay_ticks(ds.window_ticks(mkt.condition_id), mkt, p, min_size=min_size)
+    ticks = ds.window_ticks(mkt.condition_id)
+    rng_seq = (
+        spot.window_rng_seq(mkt.start, [t["t"] for t in ticks])
+        if spot is not None else None
+    )
+    res = replay_ticks(ticks, mkt, p, min_size=min_size, rng_seq=rng_seq)
     res.symbol = ds.symbol
     return res
 
@@ -158,6 +171,7 @@ def run_backtest(
     *,
     min_size: int = 5,
     limit: int | None = None,
+    spot: SpotVol | None = None,
 ) -> list[WindowResult]:
     """全量回放：跳过 outcome 缺失窗口（计数交给报表）。"""
     p = p or Crypto5mParams()
@@ -166,7 +180,7 @@ def run_backtest(
     for mkt in markets:
         if mkt.outcome not in ("Up", "Down"):
             continue
-        results.append(replay_window(ds, mkt, p, min_size=min_size))
+        results.append(replay_window(ds, mkt, p, min_size=min_size, spot=spot))
     return results
 
 
@@ -175,8 +189,9 @@ def run_grid(
     params_list: list[Crypto5mParams],
     *,
     min_size: int = 5,
+    spot: SpotVol | None = None,
 ) -> list[list[WindowResult]]:
-    """网格扫描：每窗口 tick 构造一次，逐参数组回放（单遍数据多组共享）。"""
+    """网格扫描：每窗口 tick 与 rng_seq 各构造一次，逐参数组共享回放。"""
     results: list[list[WindowResult]] = [[] for _ in params_list]
     for mkt in ds.markets:
         if mkt.outcome not in ("Up", "Down"):
@@ -184,8 +199,12 @@ def run_grid(
         if not ds.has_ticks(mkt.condition_id):
             continue
         ticks = ds.window_ticks(mkt.condition_id)  # 每窗口只构造一次
+        rng_seq = (
+            spot.window_rng_seq(mkt.start, [t["t"] for t in ticks])
+            if spot is not None else None
+        )
         for i, p in enumerate(params_list):
-            r = replay_ticks(ticks, mkt, p, min_size=min_size)
+            r = replay_ticks(ticks, mkt, p, min_size=min_size, rng_seq=rng_seq)
             r.symbol = ds.symbol
             results[i].append(r)
     return results
