@@ -27,6 +27,7 @@ from ..decisions import (
     EntryAction,
     decide_entry,
     decide_exit,
+    decide_stop,
     pick_underdog,
 )
 from ..params import Crypto5mParams
@@ -46,6 +47,7 @@ class ExitKind(StrEnum):
     NO_ENTRY = "no_entry"          # 未入场（含档深放弃）
     NO_ENTRY_DEPTH = "no_entry_depth"  # 信号成立但档深不足，保守放弃
     TAKE_PROFIT = "take_profit"
+    STOP_LOSS = "stop_loss"        # bid 跌破止损价，市价卖出（stop_loss_price>0）
     SETTLE_WIN = "settle_win"
     SETTLE_LOSE = "settle_lose"
 
@@ -108,13 +110,22 @@ def replay_ticks(
             cand, entry_ask, size, entry_t = position
             bid = book[cand]["best_bid"]
             bid_size = book[cand]["bid_size"]
-            if bid is not None and bid_size >= size and decide_exit(bid, p):
-                cost = size * entry_ask + taker_fee(size, entry_ask)
-                proceeds = size * bid - taker_fee(size, bid)
-                res.exit_kind = ExitKind.TAKE_PROFIT
-                res.pnl = proceeds - cost
-                res.fee = taker_fee(size, entry_ask) + taker_fee(size, bid)
-                return res
+            if bid is not None and bid_size >= size:
+                if decide_exit(bid, p):
+                    cost = size * entry_ask + taker_fee(size, entry_ask)
+                    proceeds = size * bid - taker_fee(size, bid)
+                    res.exit_kind = ExitKind.TAKE_PROFIT
+                    res.pnl = proceeds - cost
+                    res.fee = taker_fee(size, entry_ask) + taker_fee(size, bid)
+                    return res
+                if decide_stop(bid, p):
+                    # 止损与止盈同一保守档深门槛：深度不足宁可继续持有
+                    cost = size * entry_ask + taker_fee(size, entry_ask)
+                    proceeds = size * bid - taker_fee(size, bid)
+                    res.exit_kind = ExitKind.STOP_LOSS
+                    res.pnl = proceeds - cost
+                    res.fee = taker_fee(size, entry_ask) + taker_fee(size, bid)
+                    return res
 
     if position is None:
         return res

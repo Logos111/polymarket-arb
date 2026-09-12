@@ -16,6 +16,7 @@ def print_report(results: list[WindowResult], *, skipped_no_outcome: int, notes:
 
     entered = [r for r in results if r.size > 0]
     tp = kinds[ExitKind.TAKE_PROFIT]
+    sx = kinds[ExitKind.STOP_LOSS]
     sw = kinds[ExitKind.SETTLE_WIN]
     sl = kinds[ExitKind.SETTLE_LOSE]
     settled = sw + sl
@@ -30,6 +31,8 @@ def print_report(results: list[WindowResult], *, skipped_no_outcome: int, notes:
           f"(信号成立档深放弃 {kinds[ExitKind.NO_ENTRY_DEPTH]})")
     if entered:
         print(f"止盈: {tp}  ({tp / len(entered):.1%} of 入场)")
+        if sx:
+            print(f"止损: {sx}  ({sx / len(entered):.1%} of 入场)")
         print(f"结算: 赢 {sw} / 输 {sl}"
               f"  (胜率 {sw / settled:.1%} of 结算)" if settled else "结算: 0")
         wins = sw + tp

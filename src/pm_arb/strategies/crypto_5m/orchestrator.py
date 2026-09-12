@@ -38,6 +38,7 @@ from pm_arb.strategies.crypto_5m.decisions import (
     EntryAction,
     decide_entry,
     decide_exit,
+    decide_stop,
     pick_underdog,
 )
 from pm_arb.strategies.crypto_5m.decisions import (
@@ -335,15 +336,19 @@ class WindowOrchestrator:
                             st["entry_status"] = decide_entry(
                                 elapsed, cand, ask, None, rtds.price_range, p).status
 
-                        # ---- 止盈判定（唯一决策源：decisions.decide_exit）----
+                        # ---- 止盈/止损判定（唯一决策源：decisions）----
                         if entered and side_name is not None:
                             bb = b[side_name].get("best_bid")
+                            exit_msg = ""
                             if decide_exit(bb, p):
-                                sl.line(f"✅ 止盈: bid {bb} >= {p.take_profit_price}",
-                                        event=True)
+                                exit_msg = f"✅ 止盈: bid {bb} >= {p.take_profit_price}"
+                            elif decide_stop(bb, p):
+                                exit_msg = f"🛑 止损: bid {bb} <= {p.stop_loss_price}"
+                            if exit_msg:
+                                sl.line(exit_msg, event=True)
                                 token_id = up if side_name == "Up" else down
-                                # 止盈也用市价卖出（按持仓份数），ref_price=bb 供
-                                # 目标份数记录（SELL amount 本身即份数）
+                                # 止盈/止损均用市价卖出（按持仓份数），ref_price=bb
+                                # 供目标份数记录（SELL amount 本身即份数）
                                 o = await self.broker.place_market(
                                     token_id, Side.SELL, filled, ref_price=bb
                                 )
@@ -372,7 +377,7 @@ class WindowOrchestrator:
                 if entered:
                     fills_done += 1
                     if tp_hit:
-                        sl.line(f"[成交 {fills_done}/{self.max_fills}] ✅ 已止盈平仓。",
+                        sl.line(f"[成交 {fills_done}/{self.max_fills}] ✅ 已平仓（止盈/止损）。",
                                 event=True)
                     else:
                         pending_cost += (entry_price or Decimal(0)) * filled

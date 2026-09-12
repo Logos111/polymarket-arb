@@ -6,7 +6,8 @@
 - :func:`pick_underdog` — 冷门方（更便宜一边）选择；
 - :func:`calc_size` — 目标名义 → 份数；
 - :func:`decide_entry` — 入场判定（时间窗 + 波动过滤 + 价格区间）；
-- :func:`decide_exit` — 止盈判定。
+- :func:`decide_exit` — 止盈判定；
+- :func:`decide_stop` — 止损判定。
 
 文案（status/log）与现行 trade5m 日志逐字对齐，保证行为不变。
 """
@@ -118,3 +119,12 @@ def decide_entry(
 def decide_exit(bid: Decimal | None, p: Crypto5mParams) -> bool:
     """止盈判定：best_bid 达到固定止盈价即卖出（与入场价无关）。"""
     return bid is not None and bid >= p.take_profit_price
+
+
+def decide_stop(bid: Decimal | None, p: Crypto5mParams) -> bool:
+    """止损判定：stop_loss_price > 0 且 best_bid 跌破止损价即卖出。
+
+    0 = 关闭（默认，与现行实盘行为一致）；与止盈同一持仓分支调用，
+    实盘 orchestrator 与回测引擎共用本函数。
+    """
+    return p.stop_loss_price > 0 and bid is not None and bid <= p.stop_loss_price

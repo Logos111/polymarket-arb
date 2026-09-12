@@ -30,13 +30,19 @@ from .hf_loader import HfDataset
 
 TRAIN_FRAC = 0.7
 
-# ── 网格定义（笛卡尔积；改这里即可调参）──────────────────────────
+# ── 网格定义（笛卡尔积；改这里即可调参）──────────────────────
+# 注意：max_vol 轴在本数据集无效（无现货 TWAP，引擎 rng 恒 0），
+# 仅占位——同 (sl, until) 下三档结果完全相同；生效需 Binance K 线代理（b07）。
 AXES: dict[str, list] = {
-    "take_profit_price": [Decimal("0.45"), Decimal("0.55"), Decimal("0.65"),
-                          Decimal("0.80"), Decimal("0.99")],
-    "min_entry": [Decimal("0.15"), Decimal("0.20")],
-    "max_entry": [Decimal("0.25"), Decimal("0.30")],
+    "stop_loss_price": [Decimal("0.05"), Decimal("0.10"), Decimal("0.15")],
     "entry_until": [100, 135, 180],
+    "max_vol": [Decimal("20"), Decimal("25"), Decimal("30")],
+}
+# 固定参数（不进网格）：入场价带与止盈取上轮 60 组扫描最优
+FIXED: dict[str, Decimal | int] = {
+    "take_profit_price": Decimal("0.99"),
+    "min_entry": Decimal("0.20"),
+    "max_entry": Decimal("0.30"),
 }
 SYMBOLS = ["btc", "eth"]
 
@@ -44,7 +50,8 @@ SYMBOLS = ["btc", "eth"]
 def grid_params() -> list[Crypto5mParams]:
     keys = list(AXES)
     combos = list(itertools.product(*(AXES[k] for k in keys)))
-    return [Crypto5mParams().model_copy(update=dict(zip(keys, combo, strict=True)))
+    base = Crypto5mParams().model_copy(update=FIXED)
+    return [base.model_copy(update=dict(zip(keys, combo, strict=True)))
             for combo in combos]
 
 
@@ -72,11 +79,13 @@ def _stats(results: list[WindowResult]) -> dict:
     entered = [r for r in results if r.size > 0]
     n = len(entered)
     if not n:
-        return {"n": 0, "tp_rate": 0.0, "win_rate": 0.0, "pnl_per": 0.0, "pnl": 0.0}
+        return {"n": 0, "tp_rate": 0.0, "sl_rate": 0.0, "win_rate": 0.0,
+                "pnl_per": 0.0, "pnl": 0.0}
     tp = sum(1 for r in entered if r.exit_kind is ExitKind.TAKE_PROFIT)
+    sx = sum(1 for r in entered if r.exit_kind is ExitKind.STOP_LOSS)
     win = sum(1 for r in entered if r.exit_kind in (ExitKind.TAKE_PROFIT, ExitKind.SETTLE_WIN))
     pnl = sum(r.pnl for r in entered)
-    return {"n": n, "tp_rate": tp / n, "win_rate": win / n,
+    return {"n": n, "tp_rate": tp / n, "sl_rate": sx / n, "win_rate": win / n,
             "pnl_per": float(pnl / n), "pnl": float(pnl)}
 
 
@@ -113,9 +122,11 @@ def main() -> int:
             va = _stats(res[cut:])
             row[f"{sym}_tr_n"] = tr["n"]
             row[f"{sym}_tr_win%"] = round(tr["win_rate"] * 100, 1)
+            row[f"{sym}_tr_sl%"] = round(tr["sl_rate"] * 100, 1)
             row[f"{sym}_tr_per"] = round(tr["pnl_per"], 4)
             row[f"{sym}_va_n"] = va["n"]
             row[f"{sym}_va_win%"] = round(va["win_rate"] * 100, 1)
+            row[f"{sym}_va_sl%"] = round(va["sl_rate"] * 100, 1)
             row[f"{sym}_va_per"] = round(va["pnl_per"], 4)
         rows.append(row)
 

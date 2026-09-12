@@ -11,6 +11,7 @@ from pm_arb.strategies.crypto_5m.decisions import (
     calc_size,
     decide_entry,
     decide_exit,
+    decide_stop,
     fmt_price,
     pick_underdog,
 )
@@ -120,6 +121,22 @@ def test_decide_exit_threshold():
     assert not decide_exit(Decimal("0.98"), P)
     assert decide_exit(Decimal("0.99"), P)
     assert not decide_exit(None, P)
+
+
+# ---- decide_stop ----
+
+def test_decide_stop_disabled_by_default():
+    # 默认 stop_loss_price=0：任何价位都不止损
+    assert not decide_stop(Decimal("0.01"), P)
+    assert not decide_stop(None, P)
+
+
+def test_decide_stop_threshold():
+    Ps = Crypto5mParams(stop_loss_price=Decimal("0.10"))
+    assert decide_stop(Decimal("0.10"), Ps)
+    assert decide_stop(Decimal("0.05"), Ps)
+    assert not decide_stop(Decimal("0.11"), Ps)
+    assert not decide_stop(None, Ps)
 
 
 # ---- fmt_price ----

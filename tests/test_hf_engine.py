@@ -100,3 +100,35 @@ def test_bid_depth_short_holds_to_settle():
     res = replay_window(FakeDS(ticks), mkt("Up"), P)
     assert res.exit_kind is ExitKind.SETTLE_WIN
     assert res.pnl == Decimal(8) - (Decimal(8) * Decimal("0.28") + taker_fee(8, Decimal("0.28")))
+
+
+# ---- 止损（stop_loss_price>0 启用，与止盈同一保守档深门槛）----
+
+PSL = Crypto5mParams(entry_after=70, entry_until=135,
+                     take_profit_price=Decimal("0.65"),
+                     stop_loss_price=Decimal("0.10"),
+                     min_entry=Decimal("0.15"), max_entry=Decimal("0.30"))
+
+
+def test_stop_loss_exit():
+    # bid 跌破止损价 0.10 且档深足 → 市价止损卖出（双边手续费）
+    ticks = [tick(80), tick(100, au=0.12, bu=0.10)]
+    res = replay_window(FakeDS(ticks), mkt("Down"), PSL)
+    assert res.exit_kind is ExitKind.STOP_LOSS
+    fees = taker_fee(8, Decimal("0.28")) + taker_fee(8, Decimal("0.10"))
+    assert res.pnl == Decimal(8) * Decimal("0.10") - Decimal(8) * Decimal("0.28") - fees
+    assert res.fee == fees
+
+
+def test_stop_loss_default_off():
+    # 默认 stop_loss_price=0：同样走势不止损，持有到结算输
+    ticks = [tick(80), tick(100, au=0.12, bu=0.10), tick(299)]
+    res = replay_window(FakeDS(ticks), mkt("Down"), P)
+    assert res.exit_kind is ExitKind.SETTLE_LOSE
+
+
+def test_stop_loss_depth_short_holds():
+    # 止损价到达但 bid 档深不足 → 保守持有到结算
+    ticks = [tick(80), tick(100, au=0.12, bu=0.10, su=2)]
+    res = replay_window(FakeDS(ticks), mkt("Down"), PSL)
+    assert res.exit_kind is ExitKind.SETTLE_LOSE
