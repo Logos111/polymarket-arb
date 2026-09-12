@@ -143,6 +143,84 @@ class PaperBroker:
         self.positions[fill.token_id] += signed
         self.cash += fill.size * fill.price * (1 if fill.side is Side.SELL else -1)
 
+    # ---- 市价吃单（阶段 1 commit B：dry-run 换 PaperBroker）----
+
+    def submit_market_buy(
+        self,
+        token_id: str,
+        notional: Decimal,
+        book: LocalOrderBook | None = None,
+    ) -> Order:
+        """市价买 ``notional`` 美元：沿 ask 升序逐档吃（FAK）。
+
+        目标份数按最优 ask 估算（与 live place_market 的 ref_price 口径
+        一致，问题 4a）；实际成交沿真实档位 VWAP。无本地簿/无 ask 档
+        则 FAILED（保守：不虚构成交）。不计 taker fee——与实盘
+        realized_pnl 口径一致（价差）。
+        """
+        asks = sorted(book.snapshot.asks.items()) if book is not None else []
+        best = asks[0][0] if asks else None
+        est_size = notional / best if best else Decimal(0)
+        order = Order(
+            token_id=token_id, side=Side.BUY, order_type=OrderType.FAK,
+            price=best or Decimal(0), size=est_size,
+        )
+        if not asks:
+            order.mark_failed("paper: no ask liquidity")
+            return order
+        order.mark_submitted(f"paper-{order.client_id}")
+        self._walk_and_fill(order, asks)
+        return order
+
+    def submit_market_sell(
+        self,
+        token_id: str,
+        size: Decimal,
+        book: LocalOrderBook | None = None,
+    ) -> Order:
+        """市价卖 ``size`` 份：沿 bid 降序逐档吃（FAK）。口径同上。"""
+        bids = sorted(book.snapshot.bids.items(), reverse=True) if book is not None else []
+        best = bids[0][0] if bids else None
+        order = Order(
+            token_id=token_id, side=Side.SELL, order_type=OrderType.FAK,
+            price=best or Decimal(0), size=Decimal(size),
+        )
+        if not bids:
+            order.mark_failed("paper: no bid liquidity")
+            return order
+        order.mark_submitted(f"paper-{order.client_id}")
+        self._walk_and_fill(order, bids)
+        return order
+
+    def _walk_and_fill(self, order: Order, levels: list[tuple[Decimal, Decimal]]) -> None:
+        """沿给定档位序列（已按吃单方向排序）逐档成交到 remaining 耗尽。
+
+        终态与 live 市价单对齐：成交满 → FILLED，深度不足 → 停在
+        PARTIAL（调用方按 filled_size 判断，同实盘口径），不标 CANCELED。
+        """
+        need = order.remaining_size
+        for price, avail in levels:
+            if need <= 0:
+                break
+            take = min(need, avail)
+            order.apply_fill(take, price)
+            self._record_fill(Fill(
+                order_id=order.exchange_id or order.client_id,
+                client_id=order.client_id,
+                token_id=order.token_id,
+                side=order.side,
+                price=price,
+                size=take,
+            ))
+            need -= take
+
+    def settle(self, token_id: str, won: bool) -> Decimal:
+        """窗口结算兑付：赢方 $1/份、输方 $0（持仓清零，现金入账）。"""
+        shares = self.positions.pop(token_id, Decimal(0))
+        payout = shares if won else Decimal(0)
+        self.cash += payout
+        return payout
+
     # ---- 汇总 ----
 
     def open_orders(self) -> list[Order]:
