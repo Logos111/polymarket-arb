@@ -43,6 +43,14 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
 ]
+# b09 研究 dependency-group：只声明不安装（uv sync 不会拉取非 dev 组）；
+# 门槛条件达到后（规则模型验证段清晰超 27% 且 N≥384）再 uv sync --group research
+research = [
+    "pandas>=2.2",
+    "scikit-learn>=1.5",
+    "lightgbm>=4.4",
+    "shap>=0.46",
+]
 
 [[tool.uv.index]]
 url = "https://pypi.org/simple"

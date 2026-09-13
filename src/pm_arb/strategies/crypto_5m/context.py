@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from decimal import Decimal
 
+from pm_arb.data.book_history import BookHistory
 from pm_arb.data.clob_rest import ClobRestClient
 from pm_arb.data.feed import MarketDataFeed
 from pm_arb.data.rtds import RtdsTwapFeed
+from pm_arb.data.series_buffer import SeriesBuffer
 
 
 async def fetch_raw_market(slug: str, s) -> dict | None:
@@ -39,6 +42,28 @@ def _book_view(ob) -> dict:
         "bid_size": bb.size if bb else None,
         "ask_size": ba.size if ba else None,
     }
+
+
+class WindowFeatureBufs:
+    """b09：单窗口特征序列缓冲（现货 TWAP + 双边盘口 best 价）。
+
+    实盘 B 案数据源（工程落地方案 §2.1）：现货序列取 RTDS Chainlink
+    TWAP-60s 的 ``last``（结算同源，但推送间隔粗、心跳可能卡死——新鲜度
+    判定在 features.compute_features 内完成，卡死 → 特征 None）。
+    回测侧由 engine FeatureCapture 承担对应角色（同一 SeriesBuffer /
+    BookHistory 类，两处调用无逻辑分叉）。
+    """
+
+    def __init__(self, maxlen_spot: float = 130.0,
+                 maxlen_book: float = 65.0) -> None:
+        self.spot = SeriesBuffer(maxlen_spot)
+        self.books = BookHistory(maxlen_book)
+
+    def update(self, elapsed: float, book: dict[str, dict],
+                spot_last: Decimal | None) -> None:
+        """每 poll 一行：盘口快照 + 当前 TWAP 最新值入缓冲。"""
+        self.spot.push(elapsed, spot_last)
+        self.books.update(elapsed, book)
 
 
 class WindowDataHub:

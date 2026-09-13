@@ -1,14 +1,17 @@
 """HF 回测引擎正确性测试（合成 tick 流，不依赖 parquet）。"""
 
+from dataclasses import fields as dataclasses_fields
 from decimal import Decimal
 
 from pm_arb.strategies.crypto_5m.backtest.engine import (
     ExitKind,
+    FeatureCapture,
     replay_ticks,
     replay_window,
     taker_fee,
 )
 from pm_arb.strategies.crypto_5m.backtest.hf_loader import HfMarket
+from pm_arb.strategies.crypto_5m.features import FeatureSnapshot
 from pm_arb.strategies.crypto_5m.params import Crypto5mParams
 
 # 显式锚定参数：不随 params.py 默认值漂移（实盘默认 take_profit 已改 0.99）
@@ -166,3 +169,71 @@ def test_vol_below_threshold_enters():
     res = replay_ticks(ticks, mkt("Up"), P, rng_seq=rng_seq)
     assert res.exit_kind is ExitKind.SETTLE_WIN
     assert res.size == 8
+
+
+# ---- b09 capture（特征采集旁路；capture=None 零回归 + 行语义）----
+
+
+def test_capture_none_zero_regression():
+    """显式传 capture=None/twap_seq=None 与不传完全一致（零回归锚定）。"""
+    ticks = [tick(t) for t in range(60, 300)]
+    base = replay_ticks(ticks, mkt("Up"), P)
+    same = replay_ticks(ticks, mkt("Up"), P, rng_seq=None, twap_seq=None,
+                         capture=None)
+    assert same.exit_kind == base.exit_kind
+    assert same.pnl == base.pnl
+    assert same.entry_t == base.entry_t
+    assert same.size == base.size
+
+
+def test_capture_rows_schema_and_window():
+    """采集窗 [entry_after-30, entry_until+30] 逐秒一行；schema 完整。"""
+    ticks = [tick(t) for t in range(0, 300)]
+    cap = FeatureCapture(symbol="btc")
+    replay_ticks(ticks, mkt("Up"), P, capture=cap)
+    # P.entry_after=70，entry_until=135 → 采集 [40, 165] 共 126 行
+    assert len(cap.rows) == 126
+    r = cap.rows[0]
+    assert r["elapsed"] == 40.0 and r["cand"] == "Up"
+    assert r["symbol"] == "btc" and r["window_start"] == START
+    assert r["cand_ask"] == 0.28
+    snap_fields = {f.name for f in dataclasses_fields(FeatureSnapshot)}
+    assert snap_fields <= set(r)
+    assert cap.rows[-1]["elapsed"] == 165.0
+
+
+def test_capture_entered_marking():
+    """入场 tick（首个 elapsed≥entry_after，t=70）行 entered=True。"""
+    ticks = [tick(t) for t in range(0, 200)]
+    cap = FeatureCapture()
+    replay_ticks(ticks, mkt("Up"), P, capture=cap)
+    by_t = {r["t"]: r for r in cap.rows}
+    assert by_t[START + 69]["entered"] is False
+    assert by_t[START + 70]["entered"] is True   # 入场 tick 事后补标
+    assert by_t[START + 71]["entered"] is True
+
+
+def test_capture_no_spot_trend_all_none():
+    """无现货 TWAP：feed_fresh=False，Trend 字段全 None（§2.1 护栏）。"""
+    ticks = [tick(t) for t in range(0, 200)]
+    cap = FeatureCapture()
+    replay_ticks(ticks, mkt("Up"), P, twap_seq=None, capture=cap)
+    assert cap.rows
+    for r in cap.rows:
+        assert r["feed_fresh"] is False
+        assert r["ret_60"] is None
+        assert r["slope_30"] is None
+        assert r["score"] is None   # 评分同样不可用
+
+
+def test_capture_with_spot_feed_fresh():
+    """有现货 TWAP 序列：feed_fresh 转真，Trend 特征可算。"""
+    ticks = [tick(t) for t in range(0, 200)]
+    twap = [Decimal("77000") + Decimal(i) for i in range(200)]
+    cap = FeatureCapture()
+    replay_ticks(ticks, mkt("Up"), P, twap_seq=twap, capture=cap)
+    # 1Hz 满采样 60s → 采样数 60 ≥ 阈值，末尾行 fresh
+    late = [r for r in cap.rows if r["elapsed"] >= 100]
+    assert any(r["feed_fresh"] for r in late)
+    fresh_rows = [r for r in late if r["feed_fresh"]]
+    assert all(r["ret_60"] is not None for r in fresh_rows)

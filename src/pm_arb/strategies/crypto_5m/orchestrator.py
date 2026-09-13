@@ -36,16 +36,30 @@ from pm_arb.execution.orders import Order, Side
 from pm_arb.infra.config import get_settings
 from pm_arb.infra.store import Store
 from pm_arb.risk.gates import RiskGate
-from pm_arb.strategies.crypto_5m.context import WindowDataHub, fetch_raw_market
+from pm_arb.strategies.crypto_5m.context import (
+    WindowDataHub,
+    WindowFeatureBufs,
+    fetch_raw_market,
+)
 from pm_arb.strategies.crypto_5m.decisions import (
     EntryAction,
     decide_entry,
+    decide_entry_v2,
     decide_exit,
     decide_stop,
     pick_underdog,
 )
 from pm_arb.strategies.crypto_5m.decisions import (
     fmt_price as _fmt,
+)
+from pm_arb.strategies.crypto_5m.features import (
+    compute_features as _compute_features,
+)
+from pm_arb.strategies.crypto_5m.features import (
+    load_score_weights,
+)
+from pm_arb.strategies.crypto_5m.features import (
+    reversal_score as _reversal_score,
 )
 from pm_arb.strategies.crypto_5m.params import Crypto5mParams
 
@@ -165,6 +179,14 @@ class WindowOrchestrator:
                 f"｜未止盈拿到结算")
         sl.line(f"喂价: Polymarket RTDS Chainlink TWAP-60s（结算同源）｜日志: {sl.path}")
 
+        # b09 反转评分门控（min_reversal_score=None 时完全不启用，零回归）
+        reversal_on = p.min_reversal_score is not None
+        score_w = load_score_weights(p.score_weights_path) if reversal_on else None
+        if reversal_on:
+            sl.line(f"反转门控: 评分≥{int(p.min_reversal_score or 0)}"
+                    f"（权重 {p.score_weights_path or '内置默认'}）｜"
+                    f"评分不可用一律观察（§2.1 护栏）", event=True)
+
         fills_done = 0  # 累计成交笔数（达到 max_fills 停止）
         realized_pnl = Decimal(0)  # 已止盈平仓的实现盈亏
         pending_cost = Decimal(0)  # 持有到结算仓位的成本（赎回前未计入 PnL）
@@ -213,6 +235,7 @@ class WindowOrchestrator:
                 entry_done = False  # 已做出最终判定（成交 / 波动超限等不可恢复拒绝）
                 hard_stop: str | None = None  # KILL/熔断命中 → 清理后中止全部后续窗口
                 last_ask_reject: Decimal | None = None  # ask 拒绝只在价格变化时打印
+                fbufs = WindowFeatureBufs()  # b09：每窗口重建特征序列缓冲
                 side_name: str | None = None
                 entry_price: Decimal | None = None
                 filled = Decimal(0)
@@ -278,6 +301,9 @@ class WindowOrchestrator:
                             await asyncio.sleep(p.poll)
                             continue
                         b, src = got
+                        if reversal_on:
+                            # b09：每 poll 入缓冲（判定窗口外也 push，保序列连续）
+                            fbufs.update(elapsed, b, rtds.last)
 
                         cand, ask = pick_underdog(b)
                         # ---- 刷新状态 ----
@@ -334,9 +360,20 @@ class WindowOrchestrator:
                                 and p.entry_after <= elapsed <= p.entry_until):
                             st["entry_status"] = "判定中"
                             rng = rtds.price_range
-                            d = decide_entry(elapsed, cand, ask,
-                                             (b[cand] or {}).get("ask_size"),
-                                             rng, p, min_size=min_size)
+                            score = None
+                            if reversal_on:
+                                # b09：与回测 FeatureCapture 同一 compute_features
+                                fav = "Down" if cand == "Up" else "Up"
+                                ud_a, ud_b = fbufs.books.bufs(cand)
+                                fa, fb = fbufs.books.bufs(fav)
+                                fsnap = _compute_features(
+                                    fbufs.spot, ud_a, ud_b, fa, fb, b, cand,
+                                    float(elapsed))
+                                score = _reversal_score(fsnap, score_w)
+                            d = decide_entry_v2(
+                                elapsed, cand, ask,
+                                (b[cand] or {}).get("ask_size"),
+                                rng, p, min_size=min_size, score=score)
                             if (d.action is EntryAction.ABORT_DATA
                                     or d.action is EntryAction.ABORT_VOL):
                                 sl.line(d.log, event=True)

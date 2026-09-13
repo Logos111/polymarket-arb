@@ -34,10 +34,11 @@ class SpotVol:
         self._close = tbl.column("close").to_numpy()
         self._cums = np.concatenate(([0.0], np.cumsum(self._close)))
 
-    def window_rng_seq(self, ws: int, tick_ts: list[int]) -> list[Decimal | None]:
-        """各 tick 秒的 rng 序列（与 tick_ts 等长，自 ws 累计 high-low）。
+    def window_twap_seq(self, ws: int, tick_ts: list[int]) -> list[Decimal | None]:
+        """各 tick 秒的 twap60(t) 本身序列（与 window_rng_seq 共享同一段计算）。
 
-        现货覆盖率不足或窗口前历史缺失 → 全 None（ABORT_DATA 口径）。
+        b09 特征工程入口：engine capture 模式逐点 push 进 SeriesBuffer，
+        喂给 features.py。覆盖率不足 → 全 None（同 ABORT_DATA 口径）。
         """
         if not tick_ts:
             return []
@@ -50,8 +51,6 @@ class SpotVol:
 
         cums = self._cums
         out: list[Decimal | None] = []
-        hi_twap = -np.inf
-        lo_twap = np.inf
         for t in tick_ts:
             # 最近一条不晚于 t 的 K 线索引（缺秒前向填充）
             i = lo + int(np.searchsorted(ts, t, side="right")) - 1
@@ -59,7 +58,24 @@ class SpotVol:
                 return [None] * len(tick_ts)
             j0 = max(0, i - 59)
             twap = (cums[i + 1] - cums[j0]) / (i - j0 + 1)
-            hi_twap = max(hi_twap, twap)
-            lo_twap = min(lo_twap, twap)
+            out.append(Decimal(str(round(float(twap), 6))))
+        return out
+
+    def window_rng_seq(self, ws: int, tick_ts: list[int]) -> list[Decimal | None]:
+        """各 tick 秒的 rng 序列（与 tick_ts 等长，自 ws 累计 high-low）。
+
+        现货覆盖率不足或窗口前历史缺失 → 全 None（ABORT_DATA 口径）。
+        b09 起实现为 window_twap_seq 的后处理（不重复计算 TWAP）。
+        """
+        seq = self.window_twap_seq(ws, tick_ts)
+        out: list[Decimal | None] = []
+        hi_twap: Decimal | None = None
+        lo_twap: Decimal | None = None
+        for twap in seq:
+            if twap is None:
+                out.append(None)
+                continue
+            hi_twap = twap if hi_twap is None else max(hi_twap, twap)
+            lo_twap = twap if lo_twap is None else min(lo_twap, twap)
             out.append(Decimal(str(round(float(hi_twap - lo_twap), 2))))
         return out

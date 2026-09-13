@@ -28,8 +28,17 @@ class Crypto5mParams(BaseModel):
     max_vol: Decimal = Decimal("30")            # 本窗口 TWAP 波动上限（USD）
     poll: float = 2.0                           # 监测轮询间隔（秒）
     ws_fresh_sec: float = 10.0                  # WS 本地簿新鲜度阈值：超龄回退 REST
-    feed_fresh_sec: float = 15.0                # RTDS TWAP 新鲜度阈值：超龄不可信
+    feed_fresh_sec: float = 15.0                  # RTDS TWAP 新鲜度阈值：超龄不可信
     end_margin: int = 60                        # 结算前 N 秒停止操作
+    
+    # ---- b09 反转评分门控（默认全关 = 现行为字节级不变）----
+    min_reversal_score: Decimal | None = None   # ENTER 需反转评分 ≥ 此值；
+                                                # None = 不启用（零回归）。
+                                                # 分数不可用（喂价不新鲜）
+                                                # 一律降级观察，绝不放行
+    score_weights_path: str | None = None       # 评分阈值 JSON（缺省内置
+                                                # ScoreWeights 默认）；非数字字段，
+                                                # 不入 --param 覆盖范围
 
 
 def parse_overrides(items: list[str] | None) -> dict[str, Decimal | int]:

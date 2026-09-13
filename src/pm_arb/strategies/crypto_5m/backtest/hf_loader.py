@@ -22,7 +22,10 @@ from decimal import Decimal
 
 import pyarrow.parquet as pq
 
-TICK_COLS = ["condition_id", "t", "bu", "au", "bd", "ad", "su", "sd", "sau", "sad"]
+# du/dd（Up/Down 美元深度）已实测存在于 parquet 源文件（2026-09-13 核查），
+# b09 起一并加载（研究备用）；特征判定口径仍只用 top-of-book 价格×份数，
+# 与实盘对齐（工程落地方案 §2.3）。
+TICK_COLS = ["condition_id", "t", "bu", "au", "bd", "ad", "su", "sd", "sau", "sad", "du", "dd"]
 
 
 @dataclass(frozen=True)

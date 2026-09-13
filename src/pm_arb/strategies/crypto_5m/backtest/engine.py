@@ -19,9 +19,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from decimal import Decimal
 from enum import StrEnum
+
+from pm_arb.data.book_history import BookHistory
+from pm_arb.data.series_buffer import SeriesBuffer
 
 from ..decisions import (
     EntryAction,
@@ -30,6 +33,7 @@ from ..decisions import (
     decide_stop,
     pick_underdog,
 )
+from ..features import FeatureSnapshot, compute_features, reversal_score
 from ..params import Crypto5mParams
 from .hf_loader import HfDataset, HfMarket, d2, s2
 from .spot_vol import SpotVol
@@ -73,18 +77,26 @@ class WindowResult:
 def replay_ticks(
     ticks: list[dict], mkt: HfMarket, p: Crypto5mParams, *,
     min_size: int = 5, rng_seq: list[Decimal | None] | None = None,
+    twap_seq: list[Decimal | None] | None = None,
+    capture: FeatureCapture | None = None,
 ) -> WindowResult:
     """单窗口秒级回放核心（tick 列表可跨参数组共享，网格扫描用）。
 
     ``rng_seq``：各 tick 秒的现货波动（b07 SpotVol 重建，与 ticks 等长）；
     None 元素 = 现货数据不全（decide_entry 按 ABORT_DATA 放弃）；
     不传 = 无现货数据，rng 恒 0（max_vol 过滤关闭，旧行为）。
+
+    ``twap_seq``/``capture``（b09）：特征采集旁路——capture=None 时
+    本函数行为与旧版逐字节一致（零回归，test_hf_engine 锚定）；
+    采集只读观察，绝不影响判定路径。
     """
     res = WindowResult(
         symbol="", slug=mkt.slug, outcome=mkt.outcome,
         exit_kind=ExitKind.NO_ENTRY,
     )
     position = None   # (cand, entry_ask, size, entry_t)
+    if capture is not None:
+        capture.start_window()
 
     for i, tick in enumerate(ticks):
         elapsed = tick["t"] - mkt.start
@@ -95,6 +107,9 @@ def replay_ticks(
             "Down": {"best_ask": d2(tick["ad"]), "best_bid": d2(tick["bd"]),
                      "ask_size": s2(tick["sad"]), "bid_size": s2(tick["sd"])},
         }
+        if capture is not None:
+            capture.observe(tick, mkt, book, i, twap_seq, p,
+                            entered=position is not None)
 
         if position is None:
             cand, ask = pick_underdog(book)
@@ -113,6 +128,8 @@ def replay_ticks(
                 res.cand, res.entry_ask = cand, ask
                 res.size = dec.size
                 res.entry_t = tick["t"]
+                if capture is not None:
+                    capture.mark_entered(tick["t"])
         else:
             cand, entry_ask, size, entry_t = position
             bid = book[cand]["best_bid"]
@@ -208,3 +225,71 @@ def run_grid(
             r.symbol = ds.symbol
             results[i].append(r)
     return results
+
+
+class FeatureCapture:
+    """b09 特征采集累加器（只读旁路，绝不影响 replay_ticks 判定路径）。
+
+    逐 tick 把现货 TWAP / 双边盘口 push 进 SeriesBuffer / BookHistory，
+    调用与实盘同一套 :func:`compute_features`，行字段 = 窗口/候选元数据
+    + FeatureSnapshot 全字段（Decimal→float）+ 反转评分 + ``entered``。
+    Label（future_return_*/mfe_60/mae_60/final_outcome）不在此处算——
+    由 labels.compute_window_labels 在窗口回放完后就地附加（泄漏护栏：
+    前视信息只进 labels.py）。
+
+    采集窗口：``[entry_after-30, min(entry_until+30, 240)]``（工程方案 §3，
+    覆盖入场判定前后各 30s；缓冲仍自窗口首 tick 开始 push，保证
+    ret_120/slope_60 在采集窗口内有完整历史）。
+    """
+
+    SPOT_MAXLEN = 130.0   # 覆盖 ret_120 + 余量
+    BOOK_MAXLEN = 65.0    # 覆盖 delta_60 + 余量
+
+    def __init__(self, symbol: str = "") -> None:
+        self.symbol = symbol
+        self.rows: list[dict] = []
+        self._spot: SeriesBuffer | None = None
+        self._bh: BookHistory | None = None
+
+    def start_window(self) -> None:
+        """每窗口重建缓冲（replay_ticks 入口自动调用）。"""
+        self._spot = SeriesBuffer(self.SPOT_MAXLEN)
+        self._bh = BookHistory(self.BOOK_MAXLEN)
+
+    def mark_entered(self, t: int) -> None:
+        """入场 tick 事后补标（observe 先于决策执行，见 replay_ticks）。"""
+        if self.rows and self.rows[-1]["t"] == t:
+            self.rows[-1]["entered"] = True
+
+    def observe(self, tick: dict, mkt: HfMarket, book: dict, i: int,
+                twap_seq: list[Decimal | None] | None, p: Crypto5mParams,
+                *, entered: bool) -> None:
+        elapsed = float(tick["t"] - mkt.start)
+        twap = twap_seq[i] if twap_seq is not None else None
+        self._spot.push(elapsed, twap)
+        self._bh.update(elapsed, book)
+        lo = float(p.entry_after) - 30.0
+        hi = min(float(p.entry_until) + 30.0, 240.0)
+        if not lo <= elapsed <= hi:
+            return
+        cand, ask = pick_underdog(book)
+        if cand is None or ask is None:
+            return
+        fav = "Down" if cand == "Up" else "Up"
+        ud_a, ud_b = self._bh.bufs(cand)
+        fa, fb = self._bh.bufs(fav)
+        f = compute_features(self._spot, ud_a, ud_b, fa, fb, book, cand,
+                              elapsed)
+        row: dict = {
+            "symbol": self.symbol, "condition_id": mkt.condition_id,
+            "slug": mkt.slug, "window_start": mkt.start,
+            "t": tick["t"], "elapsed": elapsed,
+            "cand": cand, "cand_ask": float(ask),
+            "entered": entered, "score": reversal_score(f),
+        }
+        for fd in fields(FeatureSnapshot):
+            v = getattr(f, fd.name)
+            if isinstance(v, Decimal):
+                v = float(v)
+            row[fd.name] = v
+        self.rows.append(row)

@@ -1,6 +1,6 @@
 # 开发计划与项目进程（活文档）
 
-> 版本：v2.2 ｜ 日期：2026-09-13
+> 版本：v2.3 ｜ 日期：2026-09-13
 > **本文档是项目的方向与进展跟踪文档，实施过程中随进度持续更新。**
 > v2.0 起每阶段采用统一结构：**目标 / 交付物（文件级）/ 完成判据 / 验证证据 / 遗留项**；
 > 全部进度声明已经过对本地代码、测试与 pyproject 入口的逐条核查。
@@ -17,7 +17,7 @@
 | 2 | SQLite 存储层 + 结算闭环 | 4/6 | ✅ 主体完成 | 遗留：proxy Safe 赎回（2.5）、trade5m 接 recorder（2.6） |
 | 3 | 回测引擎（HF 数据集版） | 3/4 | 🔄 进行中 | 遗留：实盘日志回放对账（3.4，待自录数据积累） |
 | 4 | 风控最小集 | 4/4 | ✅ 完成 | 放量前置条件已满足；阈值体验证后可调 |
-| 5 | 参数扫描 + 特征工程 + 一致性回归 | 3/6 | 🔄 进行中 | 参数平面已扫完（无解）；5.4 基建完成，待积累样本；5.3 features.py 未开始 |
+| 5 | 参数扫描 + 特征工程 + 一致性回归 | 4/6 | 🔄 进行中 | 参数平面已扫完（无解）；5.4 基建完成待积累样本；**5.3 特征工程基建+首轮分桶完成（b09）**，批次 1/2 分析进行中 |
 | 6 | 工程卫生与治理 | 4/6 | 🔄 进行中 | 完成：SecretStr/CI/USDC 精度/README；遗留：仓库可见性、trade5m 接 recorder |
 
 状态图例：⬜ 未开始 ｜ 🔄 进行中 ｜ ✅ 完成 ｜ ⏸ 暂缓
@@ -25,7 +25,7 @@
 **当前策略基线参数**（[params.py](../src/pm_arb/strategies/crypto_5m/params.py) 默认值，实盘/回测单一来源）：
 名义 $2.00/窗；入场窗口 [70s, 135s]；入场价 [0.15, 0.30]；止盈 0.99；止损 0（关闭，已被 27 组扫描证伪）；max_vol $30；轮询 2s；ws_fresh 10s / feed_fresh 15s；结算前 60s 停止操作。
 
-**测试基线**：pytest **147 项**全绿（144 passed + 3 skipped：duckdb 集成用例仅 <3.14 解释器可跑）；ruff 零警告。
+**测试基线**：pytest **190 项**全绿（187 passed + 3 skipped：duckdb 集成用例仅 <3.14 解释器可跑）；ruff 零警告。
 
 ---
 
@@ -163,27 +163,39 @@ I/O 聚合集中在 `RiskGate` 装配层（依赖全部可注入，回测传 Non
 |---|---|---|
 | 5.1 样本量与每日报表 | 🔄 持续 | pm-record 24/7 积累 + pm-backfill 放大结算样本；每日胜率/EV 报表与置信区间（p=0.5±0.05 需 ~384 入场样本） |
 | 5.2 参数网格 + walk-forward | ✅ 首轮完成 | 见 3.2；**结论：价格/波动/止盈/止损参数平面内无解**，同平面继续微调不再投入 |
-| 5.3 特征工程（新信息维度） | ⬜ 未开始 | 见 5.3 详表 |
-| 5.4 人工判断信号系统化 | ⬜ 未开始 | 见 5.4 |
-| 5.5 验证标准与数据口径 | ⬜ 待执行纪律 | 见 5.5 |
+| 5.3 特征工程（新信息维度） | 🔄 基建+首轮完成 | 见 5.3 详表（b09：计算层全量建齐 + 批次 0 分桶报告出具） |
+| 5.4 人工判断信号系统化 | ✅ 基建完成 | 见 5.4（待积累样本） |
+| 5.5 验证标准与数据口径 | 🔄 已成纪律 | 见 5.5 |
 | 5.6 一致性回归 | 🔄 持续 | 每次实盘留录制数据，定期重放核对引擎与线上决策一致（依赖 2.6、3.4） |
 
-### 5.3 特征工程：从参数平面转向新信息维度（v1.5 新增）
+### 5.3 特征工程：从参数平面转向新信息维度（v1.5 新增；**b09 基建完成 v2.3**）
+
+**实施计划**：[b09_reversal_feature_engine_plan.md](b09_reversal_feature_engine_plan.md)（v2 合并版，吸收优化方案 + 工程落地方案）。
 
 候选特征（作为 `decide_entry` 的额外过滤条件，类似 max_vol 现有角色）：
 
 | # | 特征 | 说明 | 假设 | 优先级 |
 |---|---|---|---|---|
-| F1 | Chainlink 更新频率 | 心跳 vs 真实价格更新 | 喂价卡死造成假低波动读数——crypto_5m_underdog.md 自认最脆弱假设 | **P0 先做** |
-| F2 | 盘口失衡 | 冷门方/热门方 `(bid_size−ask_size)/(bid_size+ask_size)` | 短期买卖压力；LocalOrderBook 已有档深，改造成本低 | P1 |
-| F3 | TWAP 短窗斜率 | 最近 10–30s 价格变化率（一阶导） | 比 high-low range 更反映"现在还在往哪边冲" | P1 |
-| F4 | TWAP 二阶导 | 斜率是否放缓/反转 | 趋势衰竭常是均值回归前置信号 | P2 |
-| F5 | 价差/流动性质量 | 冷门方 bid-ask 宽度 + 深度 | 宽价差可能是流动性噪声造成的假信号 | P2 |
-| F6 | 跨币种联动 | 同窗口 BTC/ETH 结果相关性 | 同一宏观驱动互为先验；现成 HF 数据即可检验 | P2 |
-| F7 | 时段效应 | 亚洲/欧美时段流动性与基线波动差异 | 分桶 + 单调性方法论直接复用 | P3 |
-| F8 | 连续窗口自相关 | 上一窗口方向/幅度是否预示下一窗口 | 检验"动量延续 vs 均值回归" | P3 |
+| F1 | Chainlink 更新频率 | 心跳 vs 真实价格更新 | 喂价卡死造成假低波动读数——crypto_5m_underdog.md 自认最脆弱假设 | **P0 已落**（feed_fresh 护栏 + spot_sample_count_60 元数据字段） |
+| F2 | 盘口失衡 | 冷门方/热门方 `(bid_size−ask_size)/(bid_size+ask_size)` | 短期买卖压力；LocalOrderBook 已有档深，改造成本低 | P1 已落（obi_up/down + relative_obi） |
+| F3 | TWAP 短窗斜率 | 最近 10–30s 价格变化率（一阶导） | 比 high-low range 更反映"现在还在往哪边冲" | P1 已落（slope_15/30/60 + ret_N 全族） |
+| F4 | TWAP 二阶导 | 斜率是否放缓/反转 | 趋势衰竭常是均值回归前置信号 | P2 已落（acceleration/momentum_decay） |
+| F5 | 价差/流动性质量 | 冷门方 bid-ask 宽度 + 深度 | 宽价差可能是流动性噪声造成的假信号 | P2 已落（spread_ud/fav + depth_ratio；HF 数据集上 spread 分布退化不可用） |
+| F6 | 跨币种联动 | 同窗口 BTC/ETH 结果相关性 | 同一宏观驱动互为先验；现成 HF 数据即可检验 | P2 暂定（spot_token_divergence 已落，跨币联动未做） |
+| F7 | 时段效应 | 亚洲/欧美时段流动性与基线波动差异 | 分桶 + 单调性方法论直接复用 | P3 未做 |
+| F8 | 连续窗口自相关 | 上一窗口方向/幅度是否预示下一窗口 | 检验"动量延续 vs 均值回归" | P3 未做 |
 
-**工程落地**：新增 `strategies/crypto_5m/features.py`（与 decisions.py 平级的纯函数模块，无 I/O、无时钟，实盘/回测共用）；回测引擎落盘"入场时刻特征向量 + 结算结果"（CSV/SQLite，必要时补建 backtest_runs 表）；方法论沿用单变量分桶 + 单调性检验，单变量不够用时才考虑逻辑回归级打分模型，仍走 70/30 train/val 纪律。
+**已落地（b09，计算层一次建齐）**：
+- `data/series_buffer.py` + `data/book_history.py`（通用序列缓冲，实盘/回测同类两处调用，None=不知道绝不当 0）；
+- `strategies/crypto_5m/features.py`（FeatureSnapshot 40+ 字段全批次 + compute_features 纯函数 + reversal_score §28 规则评分 + score_weights.json 数据文件）；
+- `labels.py`（future_return/mfe/mae/outcome，**泄漏护栏**：test_no_lookahead_leak 静态强制实盘判定路径不得 import）；
+- 回测管线：TICK_COLS 补 du/dd、spot_vol 暴露 window_twap_seq、engine FeatureCapture 旁路（capture=None 零回归）、pm-bt5m `--capture-features` 落 parquet；
+- 实盘最小接线：params `min_reversal_score`/`score_weights_path`（默认 None 零回归）、decide_entry_v2 超集包装、context WindowFeatureBufs（B 案：RTDS last 入序列，新鲜度护栏兜底）、orchestrator 每 poll 入缓冲 + 判定时算分；
+- 研究脚本：scripts/feature_bucket_analysis.py（单变量 5 分位桶 + 单调性）+ feature_matrix_2d.py（5×5 交叉表）；pyproject research 依赖组（pandas/sklearn/lightgbm/shap）只声明不安装。
+
+**首轮证据（BTC 子集 200 窗口，21,961 采集行）**：relative_obi 单调 ρ=+0.90（Q5 vs Q1 ret60 差 +0.072）；depth_ratio_underdog 胜率 13.3%→42.0% 逐桶单调（候选过滤条件）；单边 OBI 无信号；spread 分布退化。详见 [backtest-report-b09-features.md](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-features.md)。
+
+**待办（5.3 剩余）**：批次 1/2 全量分桶 → 三因子交叉 → score 权重校准 → walk-forward 接 grid → paper trading 对照；暂定项清单见 b09 计划 §2。
 
 ### 5.4 人工判断信号系统化记录（v1.5 新增；✅ 基建完成 v2.2）
 
@@ -248,7 +260,8 @@ I/O 聚合集中在 `RiskGate` 装配层（依赖全部可注入，回测传 Non
 | data/settlement.py | 结算纯函数 + 赎回守卫 | ✅ 现行 |
 | app/{trade5m,tui5m,record_ticks,redeem,backfill,doctor,setup,watch,crypto5m}.py | 9 个 CLI 入口（pm-trade5m / pm-record / pm-redeem / pm-backfill / pm-bt5m / pm-grid5m 等，见 pyproject） | ✅ 现行 |
 | risk/ 、 portfolio/ | risk/gates.py 风控闸门（阶段 4）；portfolio/ 仍空壳 | ✅ 阶段 4（portfolio 待） |
-| strategies/crypto_5m/features.py | 特征纯函数模块 | ⬜ 阶段 5.3 |
+| strategies/crypto_5m/features.py | 特征纯函数模块（8 族 22 特征 + reversal_score） | ✅ 现行（v2.3） |
+| strategies/crypto_5m/labels.py + data/series_buffer.py + data/book_history.py | 前视标签 + 时间窗序列结构（实盘/回测同源） | ✅ 现行（v2.3） |
 
 ---
 
@@ -265,3 +278,4 @@ I/O 聚合集中在 `RiskGate` 装配层（依赖全部可注入，回测传 Non
 | 2026-09-13 | v2.0 | 全文重构 + 逐条代码核查：①统一阶段结构（目标/交付物/完成判据/验证证据/遗留），子项颗粒度细化到 4–6 项/阶段并标完成度（0:4/4、1:5/5、2:4/6、3:3/4、4:0/4、5:2/6、6:0/6）；②事实更正：store.py 实际仅三表（backtest_runs 未建，网格结果落 runtime/grid_runs.csv）；回测包实际布局为 engine/grid/hf_loader/spot_vol/run/report（替代旧设想布局）；README L44-47 目录脱节属实；config.py:40 私钥为 str 属实；redeem.py:76 硬编码 10**6 属实；trade5m 未接 recorder 属实；无 .github/workflows 属实；③基线快照：params.py 现行默认值全量登记；pytest 118 项实测；runtime/logs 已 20 份；④回测结论档案化（四轮实验汇总表，含根因：盈亏平衡 27% vs 实际 23.5~25.1%）；⑤特征候选 F1–F8 排优先级（F1 Chainlink 更新频率 P0） |
 | 2026-09-13 | v2.1 | ticks 压实管线（b08）：①data/ticks_compact.py + app/compact.py（pm-compact）：已封口 market JSONL → date 分区 Parquet（book 行 = 全档展开 1480 万行/日，meta 行 = 小事件原样保 JSON），双重校验（parquet 行数 = 写出行数；事件数守恒）通过才删源；②实测压缩 25.1x（490MB→19.5MB/日，b08 实验先验证 28.1x）；③duckdb 依赖带 `python_version < '3.14'` marker（cp314 wheel DLL 损坏实测），pm-compact 须 3.12 运行；④pm-record 开机自启 + tkinter 监视器（启动文件夹 VBS，绿/橙/灰状态窗）；⑤测试基线 118→127 |
 | 2026-09-13 | v2.2 | **阶段 4 风控最小集完成 + 工程卫生四项（b09）**：①risk/gates.py（check_order 纯函数 + RiskGate 装配层，KILL/单笔/单日投入/单日亏损熔断/重复入场/USDC fail-closed/gas 告警，拒绝优先级固定）；②orchestrator ENTER 分支下单前过闸（KILL/熔断中止全部窗口 return 2，其余放弃本窗口），trade5m 装配 live 链上余额/gas 注入；③store.py 增 day_stats（[ds, ds+86400) 半开区间）/has_open_position/mark_redeemed 补 windows 表；④config.py 私钥+L2 凭证改 SecretStr（clob_trader/chain/doctor/setup 四调用方同步）；⑤redeem.py USDC 精度改动态查询；⑥.github/workflows/ci.yml（3.12 + ruff + pytest）+ README 目录图/路线图同步；⑦5.4 基建：data/judgment_log.py（SIGNAL_TAGS 词表 11 标签）+ pm-judgment CLI（append-only JSONL）；测试抓到两真实 bug（balance 异常穿透、day_stats 未来行计入）已修；测试基线 127→147 |
+| 2026-09-13 | v2.3 | **5.3 特征工程基建 + 首轮分桶完成（b09）**：①数据结构：data/series_buffer.py（时间窗双端队列）+ data/book_history.py（双边盘口历史）；②features.py 特征纯函数模块（8 族 22 特征，None 语义纪律：缺数据/超龄/样本不足一律 None）；③labels.py 前视标签（future_return/mfe/mae/final_outcome，仅回测研究管线可用，AST 护栏测试静态隔离）；④回测管线：FeatureCapture 采集窗 + pm-bt5m --capture-features → Parquet（BTC 175 窗口 21,961 行实测）；⑤实盘接线：decisions.decide_entry_v2 评分门控（score None 或 <min → OBSERVE 不放行，默认 None 零回归）+ orchestrator WindowFeatureBufs 每窗口算分；⑥研究脚本：等频 5 分位分桶 + 5×5 二维交叉 + pyproject research 依赖组（只声明不装）。首轮证据：relative_obi 单调 ρ=+0.90（Q5 ret60 +0.047 vs Q1 -0.024）；depth_ratio_underdog 胜率 13.3%→42.0% 单调（候选过滤）；spread 分布退化不可用。测试基线 147→187 passed（+40：11 series_buffer + 12 features + 6 labels/泄漏护栏 + 6 decide_entry_v2 + 5 capture，含 labels 真 bug 修复：缺 cand_ask 时 final_outcome 被跳过） |

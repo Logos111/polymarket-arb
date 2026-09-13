@@ -116,6 +116,48 @@ def decide_entry(
     )
 
 
+def decide_entry_v2(
+    elapsed: float,
+    cand: str,
+    ask: Decimal | None,
+    ask_size: int | None,
+    rng: Decimal | None,
+    p: Crypto5mParams,
+    *,
+    min_size: int = 5,
+    score: int | None = None,
+) -> EntryDecision:
+    """decide_entry 的 b09 超集（反转评分门控；实盘 orchestrator 用）。
+
+    完全复用 :func:`decide_entry`，仅在 ``p.min_reversal_score`` 非 None
+    且基础判定为 ENTER 时叠加评分门控：
+
+    - 评分不足（``score < min_reversal_score``）→ 降级 OBSERVE
+      （ask 回落可重新判定，与基础判定观察语义一致）；
+    - 评分不可用（``score=None``，喂价不新鲜/数据缺失，§2.1 护栏）
+      → 同样降级 OBSERVE，**绝不放行**；
+    - ``p.min_reversal_score=None``（默认）→ 返回基础判定原样，
+      逐字段一致（零回归，test_decisions 锚定）。
+
+    ``score`` 由调用方经 features.reversal_score 计算（回测与实盘
+    同一计算源）；本函数保持纯判定、不 import features（防环）。
+    """
+    base = decide_entry(elapsed, cand, ask, ask_size, rng, p,
+                        min_size=min_size)
+    if p.min_reversal_score is None or base.action is not EntryAction.ENTER:
+        return base
+    need = int(p.min_reversal_score)
+    if score is None:
+        return EntryDecision(
+            EntryAction.OBSERVE, "观察(评分不可用)",
+            log=f"[入场检查] … {cand} 反转评分不可用（喂价不新鲜/数据缺失），观察")
+    if score < need:
+        return EntryDecision(
+            EntryAction.OBSERVE, f"观察(评分{score}<{need})",
+            log=f"[入场检查] … {cand} 反转评分 {score} < {need}，观察")
+    return base
+
+
 def decide_exit(bid: Decimal | None, p: Crypto5mParams) -> bool:
     """止盈判定：best_bid 达到固定止盈价即卖出（与入场价无关）。"""
     return bid is not None and bid >= p.take_profit_price
