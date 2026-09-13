@@ -125,14 +125,15 @@ def test_spot_token_divergence() -> None:
 
 
 def _sym_snapshot(trend: str, *, fresh=True) -> FeatureSnapshot:
-    """构造对称情景：trend='down' 现货下行+冷门方(Up)走强；'up' 为镜像。"""
+    """构造对称情景：trend='down' 现货下行+冷门方深跌待反弹；'up' 为镜像。"""
     if trend == "down":
         return FeatureSnapshot(
             feed_fresh=fresh, slope_60=Decimal("-1"), slope_15=Decimal("1"),
             slope_30=Decimal("-0.5"), ret_15=Decimal("0.0001"),
             ret_30=Decimal("0.0003"), dist_low=Decimal("1"),
             new_low_count_15=0, new_low_count_30=0,
-            ud_ask_delta_30=Decimal("0.01"), relative_obi=Decimal("0.1"),
+            ud_ask_delta_30=Decimal("-0.20"), relative_obi=Decimal("0.6"),
+            momentum_decay=Decimal("0.00005"),
             fav_mid_delta_30=Decimal("-0.03"),
         )
     return FeatureSnapshot(
@@ -140,7 +141,8 @@ def _sym_snapshot(trend: str, *, fresh=True) -> FeatureSnapshot:
         slope_30=Decimal("0.5"), ret_15=Decimal("-0.0001"),
         ret_30=Decimal("-0.0003"), dist_high=Decimal("1"),
         new_high_count_15=0, new_high_count_30=0,
-        ud_ask_delta_30=Decimal("0.01"), relative_obi=Decimal("0.1"),
+        ud_ask_delta_30=Decimal("-0.20"), relative_obi=Decimal("0.6"),
+        momentum_decay=Decimal("0.00005"),
         fav_mid_delta_30=Decimal("0.03"),
     )
 
@@ -149,8 +151,9 @@ def test_reversal_score_symmetric() -> None:
     """方向对称性：同一结构的镜像情景评分一致。"""
     down = reversal_score(_sym_snapshot("down"))
     up = reversal_score(_sym_snapshot("up"))
-    # +2 slope反转 +2 ud买入 +1 掉头 +1 近极值 +1 不创极值 +1 OBI −2 fav 增强
-    assert down == up == 6
+    # +2 ud深跌 +2 slope反转 +1 掉头 +1 近极值 +1 不创极值
+    # +1 OBI +1 动能未衰竭 −2 fav 增强
+    assert down == up == 7
 
 
 def test_reversal_score_guards() -> None:
@@ -180,6 +183,29 @@ def test_reversal_score_penalties() -> None:
         new_low_count_30=1, fav_mid_delta_30=Decimal("-0.001"),
     )
     assert reversal_score(f2) == 0
+
+
+def test_reversal_score_v2_terms() -> None:
+    """v2 证据校准项：冷门方跌幅分级 / 薄深度罚 / 动能未衰竭 / OBI 阈值。"""
+    base = FeatureSnapshot(feed_fresh=True, slope_60=Decimal("-1"))
+    # 冷门方 30s 跌幅分级（深跌→反弹，原“>0 被买入”方向已证伪）
+    assert reversal_score(replace_f(base, ud_ask_delta_30=Decimal("-0.20"))) == 2
+    assert reversal_score(replace_f(base, ud_ask_delta_30=Decimal("-0.10"))) == 1
+    assert reversal_score(replace_f(base, ud_ask_delta_30=Decimal("-0.05"))) == 0
+    assert reversal_score(replace_f(base, ud_ask_delta_30=Decimal("0.10"))) == 0
+    # 极薄深度罚（depth_ratio<0.27，胜率 13.6%）
+    assert reversal_score(
+        replace_f(base, depth_ratio_underdog=Decimal("0.20"))) == -2
+    assert reversal_score(
+        replace_f(base, depth_ratio_underdog=Decimal("0.50"))) == 0
+    # 动能未衰竭（momentum_decay≤0.0001）
+    assert reversal_score(
+        replace_f(base, momentum_decay=Decimal("0.00005"))) == 1
+    assert reversal_score(
+        replace_f(base, momentum_decay=Decimal("0.001"))) == 0
+    # relative_obi ≥ 0.5（v2 从 0.05 提至 Q4 边界）
+    assert reversal_score(replace_f(base, relative_obi=Decimal("0.6"))) == 1
+    assert reversal_score(replace_f(base, relative_obi=Decimal("0.4"))) == 0
 
 
 def test_load_score_weights() -> None:

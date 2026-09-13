@@ -233,13 +233,22 @@ def compute_features(
 
 @dataclass(frozen=True)
 class ScoreWeights:
-    """离散评分阈值（score_weights.json 可调；全部暂定，待数据标定）。"""
+    """离散评分阈值（score_weights.json 可调）。
+
+    v2（2026-09-14）：按批次 0/1/2 分桶证据校准（BTC 21,961 行）——
+    翻转 ud_ask_delta_30 方向（深跌→反弹，全族 ρ≤-0.60）、
+    obi_improve 提至 0.5（Q4 边界转正）、新增薄深度罚分与动能未衰竭加分。
+    """
 
     near_extreme_usd: float = 3.0       # 现价距窗口极值 ≤ 该 USD 值 → 接近极值
-    obi_improve: float = 0.05           # relative_obi > 该值 → 冷门方买压占优
+    obi_improve: float = 0.5            # relative_obi ≥ 该值 → 冷门方买压占优（Q4 边界）
     new_extreme_burst: int = 3          # 30s 内创新极值 ≥ 该次数 → 趋势仍强
     trend_ret_15: float = 0.0002        # |ret_15| ≥ 该值 → 短线趋势仍强
     fav_delta_30: float = 0.02          # fav 30s 涨幅 ≥ 该绝对值 → 热门方增强
+    ud_delta_deep: float = 0.15         # ud 30s 跌幅 ≥ 该值 → 深反转 +2（桶 Q1 边界）
+    ud_delta_mild: float = 0.08         # ud 30s 跌幅 ≥ 该值 → 反转 +1（桶 Q2 边界）
+    thin_depth_ratio: float = 0.27      # depth_ratio < 该值 → 极薄深度 −2（胜率 13.6%）
+    momentum_flat: float = 0.0001       # momentum_decay ≤ 该值 → 动能未衰竭 +1
 
 
 DEFAULT_WEIGHTS = ScoreWeights()
@@ -267,16 +276,23 @@ def reversal_score(f: FeatureSnapshot, w: ScoreWeights | None = None,
     - ``feed_fresh=False``（喂价不新鲜，§2.1 护栏）；
     - ``slope_60`` 缺失或为 0（趋势方向未定义，反转无从谈起）。
 
-    语义约定（方向对称，d = sign(slope_60) 为当前趋势方向）：
+    语义约定（方向对称，d = sign(slope_60) 为当前趋势方向；v2 按分桶证据校准）：
+    +2  冷门方深跌待反弹：ud_ask_delta_30 ≤ −w.ud_delta_deep（全族 ρ≤−0.60，
+        深跌 → 未来 60s 中价反弹 +0.10~+0.12；原“>0 被买入”方向被证伪）；
+    +1  冷门方中度下跌：ud_ask_delta_30 ≤ −w.ud_delta_mild；
     +2  现货短线动量反转：slope_15 与 slope_60 反向；
-    +2  冷门方被市场买入：ud_ask_delta_30 > 0（真金白银投票反转）；
     +1  现货短线掉头：ret_30 与 d 反向；
     +1  现价接近趋势方向极值（d<0 看低点，d>0 看高点）；
     +1  趋势方向不再创极值（d<0 看 15s 新低计数 == 0）；
-    +1  冷门方相对买压占优：relative_obi ≥ w.obi_improve；
-    -3  趋势仍猛烈：d 方向 30s 创新极值次数 ≥ w.new_extreme_burst；
-    -2  短线趋势仍强：slope_15/slope_30 与 d 同向且 |ret_15| ≥ w.trend_ret_15；
-    -2  热门方继续增强：fav_mid_delta_30 与 d 同向且 |·| ≥ w.fav_delta_30。
+    +1  冷门方相对买压占优：relative_obi ≥ w.obi_improve（ρ=+0.90）；
+    +1  动能未衰竭：momentum_decay ≤ w.momentum_flat（组合信号最强 ret60 +0.30）；
+    −3  趋势仍猛烈：d 方向 30s 创新极值次数 ≥ w.new_extreme_burst；
+    −2  短线趋势仍强：slope_15/slope_30 与 d 同向且 |ret_15| ≥ w.trend_ret_15；
+    −2  热门方继续增强：fav_mid_delta_30 与 d 同向且 |·| ≥ w.fav_delta_30；
+    −2  极薄深度：depth_ratio_underdog < w.thin_depth_ratio（胜率 13.6%）。
+
+    已知不对称（未入规则，待验证）：深反转在现货下行时 ret60 +0.24 vs 上行 +0.03，
+    但胜率反向（27.8% vs 33.6%）——与持有到结算口径冲突，见批次 1/2 研究报告。
     """
     if not f.feed_fresh:
         return None
@@ -286,9 +302,12 @@ def reversal_score(f: FeatureSnapshot, w: ScoreWeights | None = None,
     w = w or DEFAULT_WEIGHTS
     d = _sign(s60)
     score = 0
+    if f.ud_ask_delta_30 is not None:
+        if f.ud_ask_delta_30 <= -Decimal(str(w.ud_delta_deep)):
+            score += 2
+        elif f.ud_ask_delta_30 <= -Decimal(str(w.ud_delta_mild)):
+            score += 1
     if f.slope_15 is not None and _sign(f.slope_15) == -d:
-        score += 2
-    if f.ud_ask_delta_30 is not None and f.ud_ask_delta_30 > 0:
         score += 2
     if f.ret_30 is not None and _sign(f.ret_30) == -d:
         score += 1
@@ -311,6 +330,12 @@ def reversal_score(f: FeatureSnapshot, w: ScoreWeights | None = None,
     if (f.relative_obi is not None
             and f.relative_obi >= Decimal(str(w.obi_improve))):
         score += 1
+    if (f.momentum_decay is not None
+            and f.momentum_decay <= Decimal(str(w.momentum_flat))):
+        score += 1
+    if (f.depth_ratio_underdog is not None
+            and f.depth_ratio_underdog < Decimal(str(w.thin_depth_ratio))):
+        score -= 2
     if burst:
         score -= 3
     if (f.slope_15 is not None and _sign(f.slope_15) == d

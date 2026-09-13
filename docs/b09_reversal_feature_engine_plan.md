@@ -4,7 +4,7 @@
 > + [crypto_5m_underdog_特征工程_工程落地方案.md](../src/pm_arb/strategies/crypto_5m_underdog_特征工程_工程落地方案.md)（工程落地方案，工程判断）
 > + b09 v1 计划（本文档上一版，已合并废弃）。
 > 对应 DEV_PLAN 阶段 5.3（特征工程）+ F1（P0）。
-> 状态：✅ 基建 + 批次 0 已实施（2026-09-13，见 [backtest-report-b09-features.md](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-features.md)）；批次 1/2 分析进行中；暂定项清单保留文末
+> 状态：✅ 基建 + 批次 0/1/2 + 评分 v2 校准已实施（2026-09-14，见 [批次 0 报告](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-features.md) / [批次 1/2 报告](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-batch12.md)）；待 walk-forward 标定；暂定项清单保留文末
 
 ## 0. 与 v1 计划的差异（吸收工程落地方案后的修订）
 

@@ -1,7 +1,11 @@
 {
     "near_extreme_usd": 3.0,
-    "obi_improve": 0.05,
+    "obi_improve": 0.5,
     "new_extreme_burst": 3,
     "trend_ret_15": 0.0002,
-    "fav_delta_30": 0.02
+    "fav_delta_30": 0.02,
+    "ud_delta_deep": 0.15,
+    "ud_delta_mild": 0.08,
+    "thin_depth_ratio": 0.27,
+    "momentum_flat": 0.0001
 }
