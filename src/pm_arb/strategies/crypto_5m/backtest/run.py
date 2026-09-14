@@ -120,6 +120,10 @@ def main() -> int:
             print(f"[{sym}] 特征已落盘: {path}")
             print(f"  窗口 {n_win}，采集行 {n_rows}，入场行 {n_ent}")
             continue
+        if p.min_reversal_score is not None:
+            assert spot is not None, (
+                "评分门控（min_reversal_score）需 --spot：无现货 TWAP → "
+                "score=None → fail-closed 全部 OBSERVE（零入场）")
         results = run_backtest(ds, p, limit=args.limit, spot=spot)
         print_report(results, skipped_no_outcome=skipped,
                      notes=NOTES_SPOT if args.spot else NOTES)

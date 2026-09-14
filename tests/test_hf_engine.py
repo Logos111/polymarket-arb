@@ -237,3 +237,58 @@ def test_capture_with_spot_feed_fresh():
     assert any(r["feed_fresh"] for r in late)
     fresh_rows = [r for r in late if r["feed_fresh"]]
     assert all(r["ret_60"] is not None for r in fresh_rows)
+
+
+# ── 评分门控（b09 二轮：min_reversal_score 回测接线）──────────────
+
+def _gate_ticks() -> list[dict]:
+    """构造 t=70 刻 reversal_score=5 的场景。
+
+    现货：t∈[10,40] 微涨 5 USD 后走平（slope_60>0 且斜率小）；
+    冷门方（Up）ask 自 0.45 线性跌至 0.25（t=70 止）→ delta_30≈-0.086；
+    挂单簿：Up 买压强（obi_up=+0.8）且深度厚（ratio≈0.69 无薄深罚）。
+    """
+    return [
+        tick(t, au=Decimal("0.45") - Decimal("0.20") * Decimal(min(t, 70)) / 70,
+             bu=0.20, su=800, sau=100, sd=50, sad=500)
+        for t in range(0, 301)
+    ]
+
+
+def _gate_twap() -> list[Decimal]:
+    return [Decimal(100000) + Decimal(5) * Decimal(max(0, min(t - 10, 30))) / 30
+            for t in range(301)]
+
+
+def test_gate_blocks_entry_when_score_below_threshold():
+    """阈值 6 > 场景最高分 5 → 全部 OBSERVE，零入场。"""
+    p6 = P.model_copy(update={"min_reversal_score": 6})
+    res = replay_ticks(_gate_ticks(), mkt("Down"), p6, twap_seq=_gate_twap())
+    assert res.exit_kind is ExitKind.NO_ENTRY and res.size == 0
+
+
+def test_gate_passes_entry_when_score_meets_threshold():
+    """阈值 5：t=70 首判即 score=5 → ENTER，入场价 0.25，结算输。"""
+    p5 = P.model_copy(update={"min_reversal_score": 5})
+    res = replay_ticks(_gate_ticks(), mkt("Down"), p5, twap_seq=_gate_twap())
+    assert res.exit_kind is ExitKind.SETTLE_LOSE
+    assert res.entry_ask == Decimal("0.25")
+    assert res.entry_t == START + 70
+    assert res.size == 8  # max(ceil(2/0.25), 5)
+
+
+def test_gate_fail_closed_without_spot():
+    """无 twap_seq（现货缺失）→ score=None → fail-closed：基础 ENTER 也降级 OBSERVE。"""
+    p5 = P.model_copy(update={"min_reversal_score": 5})
+    res = replay_ticks(_gate_ticks(), mkt("Down"), p5, twap_seq=None)
+    assert res.exit_kind is ExitKind.NO_ENTRY and res.size == 0
+
+
+def test_gate_off_twap_seq_harmless():
+    """门控关闭时传入 twap_seq 不影响判定（零回归：run_grid 共享 twap 场景）。"""
+    ticks = _gate_ticks()
+    r1 = replay_ticks(ticks, mkt("Down"), P, twap_seq=None)
+    r2 = replay_ticks(ticks, mkt("Down"), P, twap_seq=_gate_twap())
+    assert r1 == r2
+    # 基准（无门控）同数据：t=70（首个 elapsed≥entry_after 且价格入带）入场
+    assert r1.size > 0 and r1.entry_t == START + 70

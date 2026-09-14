@@ -32,17 +32,21 @@ from .spot_vol import SpotVol
 TRAIN_FRAC = 0.7
 
 # ── 网格定义（笛卡尔积；改这里即可调参）──────────────────────
-# b07 轮：max_vol 轴需 --spot（Binance 1s K 线重建滚动 60s TWAP）；
-# 止损已证伪固定关闭（stop_loss_price 默认 0），止盈/入场价带固定上轮最优。
+# b09 三轮：评分门控阈值扫描（reversal_score v2 已按分桶证据校准）。
+# 基线行 min_reversal_score=None（门控关闭）与后续行同口径对照，
+# 差分即门控增量。固定参数取 b07 最优（mv=20/until=100）+ 上轮价格带；
+# 门控需 --spot（无现货 → fail-closed 零入场，run_grid 会传 twap_seq）。
 AXES: dict[str, list] = {
-    "max_vol": [Decimal("20"), Decimal("25"), Decimal("30")],
-    "entry_until": [100, 135, 180],
+    "min_reversal_score": [None, 1, 2, 3, 4, 5, 6, 7],
 }
-# 固定参数（不进网格）：入场价带与止盈取上轮 60 组扫描最优
+# 固定参数（不进网格）：入场价带与止盈取上轮 60 组扫描最优；
+# 止损已证伪固定关闭（stop_loss_price 默认 0）。
 FIXED: dict[str, Decimal | int] = {
     "take_profit_price": Decimal("0.99"),
     "min_entry": Decimal("0.20"),
     "max_entry": Decimal("0.30"),
+    "max_vol": Decimal("20"),
+    "entry_until": 100,
 }
 SYMBOLS = ["btc", "eth"]
 

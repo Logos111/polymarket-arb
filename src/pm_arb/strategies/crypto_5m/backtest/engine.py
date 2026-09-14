@@ -26,14 +26,21 @@ from enum import StrEnum
 from pm_arb.data.book_history import BookHistory
 from pm_arb.data.series_buffer import SeriesBuffer
 
+from ..context import WindowFeatureBufs
 from ..decisions import (
     EntryAction,
     decide_entry,
+    decide_entry_v2,
     decide_exit,
     decide_stop,
     pick_underdog,
 )
-from ..features import FeatureSnapshot, compute_features, reversal_score
+from ..features import (
+    FeatureSnapshot,
+    compute_features,
+    load_score_weights,
+    reversal_score,
+)
 from ..params import Crypto5mParams
 from .hf_loader import HfDataset, HfMarket, d2, s2
 from .spot_vol import SpotVol
@@ -89,12 +96,22 @@ def replay_ticks(
     ``twap_seq``/``capture``（b09）：特征采集旁路——capture=None 时
     本函数行为与旧版逐字节一致（零回归，test_hf_engine 锚定）；
     采集只读观察，绝不影响判定路径。
+
+    评分门控（b09 二轮）：``p.min_reversal_score`` 非 None 时启用——
+    自窗口首 tick 起（与实盘 orchestrator 同口径：每 poll 入缓冲，
+    保 slope_60/delta_60 在入场判定时有完整历史）维护 WindowFeatureBufs，
+    判定时算 reversal_score 交给 decide_entry_v2；None（默认）走
+    decide_entry 原路径，零回归。门控需调用方传 twap_seq（无现货 →
+    score=None → fail-closed 全部 OBSERVE）。
     """
     res = WindowResult(
         symbol="", slug=mkt.slug, outcome=mkt.outcome,
         exit_kind=ExitKind.NO_ENTRY,
     )
     position = None   # (cand, entry_ask, size, entry_t)
+    gate = p.min_reversal_score is not None
+    fbufs = WindowFeatureBufs() if gate else None
+    score_w = load_score_weights(p.score_weights_path) if gate else None
     if capture is not None:
         capture.start_window()
 
@@ -110,13 +127,30 @@ def replay_ticks(
         if capture is not None:
             capture.observe(tick, mkt, book, i, twap_seq, p,
                             entered=position is not None)
+        if fbufs is not None:
+            fbufs.update(float(elapsed), book,
+                         twap_seq[i] if twap_seq is not None else None)
 
         if position is None:
             cand, ask = pick_underdog(book)
             if ask is None:
                 continue
             ask_size = book[cand]["ask_size"]
-            dec = decide_entry(elapsed, cand, ask, ask_size, rng, p, min_size=min_size)
+            if fbufs is not None:
+                # 与实盘 orchestrator 同一计算源（context.WindowFeatureBufs
+                # + features.compute_features + reversal_score）
+                fav = "Down" if cand == "Up" else "Up"
+                ud_a, ud_b = fbufs.books.bufs(cand)
+                fa, fb = fbufs.books.bufs(fav)
+                fsnap = compute_features(
+                    fbufs.spot, ud_a, ud_b, fa, fb, book, cand,
+                    float(elapsed))
+                score = reversal_score(fsnap, score_w)
+                dec = decide_entry_v2(elapsed, cand, ask, ask_size, rng, p,
+                                      min_size=min_size, score=score)
+            else:
+                dec = decide_entry(elapsed, cand, ask, ask_size, rng, p,
+                                   min_size=min_size)
             if dec.action is EntryAction.ENTER:
                 if ask_size < dec.size:
                     # 保守铁律：档深不足宁可放弃，不部分成交
@@ -177,7 +211,12 @@ def replay_window(
         spot.window_rng_seq(mkt.start, [t["t"] for t in ticks])
         if spot is not None else None
     )
-    res = replay_ticks(ticks, mkt, p, min_size=min_size, rng_seq=rng_seq)
+    twap_seq = (
+        spot.window_twap_seq(mkt.start, [t["t"] for t in ticks])
+        if spot is not None and p.min_reversal_score is not None else None
+    )
+    res = replay_ticks(ticks, mkt, p, min_size=min_size,
+                       rng_seq=rng_seq, twap_seq=twap_seq)
     res.symbol = ds.symbol
     return res
 
@@ -209,6 +248,8 @@ def run_grid(
     spot: SpotVol | None = None,
 ) -> list[list[WindowResult]]:
     """网格扫描：每窗口 tick 与 rng_seq 各构造一次，逐参数组共享回放。"""
+    # 任一参数组开启评分门控 → 需 twap_seq（spot 缺失时 fail-closed 全 OBSERVE）
+    need_twap = any(pp.min_reversal_score is not None for pp in params_list)
     results: list[list[WindowResult]] = [[] for _ in params_list]
     for mkt in ds.markets:
         if mkt.outcome not in ("Up", "Down"):
@@ -216,12 +257,15 @@ def run_grid(
         if not ds.has_ticks(mkt.condition_id):
             continue
         ticks = ds.window_ticks(mkt.condition_id)  # 每窗口只构造一次
-        rng_seq = (
-            spot.window_rng_seq(mkt.start, [t["t"] for t in ticks])
-            if spot is not None else None
+        ts = [t["t"] for t in ticks]
+        rng_seq = spot.window_rng_seq(mkt.start, ts) if spot is not None else None
+        twap_seq = (
+            spot.window_twap_seq(mkt.start, ts)
+            if spot is not None and need_twap else None
         )
         for i, p in enumerate(params_list):
-            r = replay_ticks(ticks, mkt, p, min_size=min_size, rng_seq=rng_seq)
+            r = replay_ticks(ticks, mkt, p, min_size=min_size,
+                             rng_seq=rng_seq, twap_seq=twap_seq)
             r.symbol = ds.symbol
             results[i].append(r)
     return results
