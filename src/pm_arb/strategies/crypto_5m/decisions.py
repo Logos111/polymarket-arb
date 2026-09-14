@@ -4,6 +4,7 @@
 本模块只做判定，不做 I/O、不读时钟、不下单：
 
 - :func:`pick_underdog` — 冷门方（更便宜一边）选择；
+- :func:`book_depth_ratio` — 冷门方/热门方 top-of-book 名义深度比（b10 veto 口径）；
 - :func:`calc_size` — 目标名义 → 份数；
 - :func:`decide_entry` — 入场判定（时间窗 + 波动过滤 + 价格区间）；
 - :func:`decide_exit` — 止盈判定；
@@ -36,6 +37,24 @@ def pick_underdog(b: dict[str, dict]) -> tuple[str, Decimal | None]:
     if down_ask is None or (up_ask is not None and up_ask <= down_ask):
         return "Up", up_ask
     return "Down", down_ask
+
+
+def book_depth_ratio(book: dict[str, dict], cand: str) -> Decimal | None:
+    """冷门方 ask 名义 / 热门方 bid 名义（top-of-book，b10 深度 veto 口径）。
+
+    与 P0 重验脚本 / features.depth_ratio 同口径（瞬时版）：任一侧价格
+    缺失或档深为零 → None，调用方 fail-closed 降级观察，绝不放行。
+    """
+    fav = "Down" if cand == "Up" else "Up"
+    ud = book.get(cand) or {}
+    fv = book.get(fav) or {}
+    ua, us = ud.get("best_ask"), ud.get("ask_size")
+    fb, fs = fv.get("best_bid"), fv.get("bid_size")
+    # 分母 ≤ 0（bid=0 / 档深为 0）→ None：Decimal 除零会抛异常，
+    # 与 features.depth_ratio 的 fav_notional > 0 防护同口径
+    if ua is None or not us or fb is None or fb <= 0 or not fs:
+        return None
+    return ua * us / (fb * fs)
 
 
 def calc_size(ask: Decimal, min_size: int, target_notional: Decimal) -> int:
@@ -126,35 +145,50 @@ def decide_entry_v2(
     *,
     min_size: int = 5,
     score: int | None = None,
+    depth_ratio: Decimal | None = None,
 ) -> EntryDecision:
-    """decide_entry 的 b09 超集（反转评分门控；实盘 orchestrator 用）。
+    """decide_entry 的 b09/b10 超集（评分 + 深度双门控；实盘 orchestrator 用）。
 
-    完全复用 :func:`decide_entry`，仅在 ``p.min_reversal_score`` 非 None
-    且基础判定为 ENTER 时叠加评分门控：
+    完全复用 :func:`decide_entry`，仅在对应参数非 None 且基础判定为
+    ENTER 时叠加门控（两门控独立启停）：
 
-    - 评分不足（``score < min_reversal_score``）→ 降级 OBSERVE
-      （ask 回落可重新判定，与基础判定观察语义一致）；
-    - 评分不可用（``score=None``，喂价不新鲜/数据缺失，§2.1 护栏）
-      → 同样降级 OBSERVE，**绝不放行**；
-    - ``p.min_reversal_score=None``（默认）→ 返回基础判定原样，
-      逐字段一致（零回归，test_decisions 锚定）。
+    - 评分门控（b09，``p.min_reversal_score``）：评分不足（``score <
+      min_reversal_score``）或不可用（``score=None``，喂价不新鲜/数据
+      缺失，§2.1 护栏）→ 降级 OBSERVE，**绝不放行**；
+    - 深度门控（b10，``p.min_depth_ratio``）：冷门方 ask 名义/热门方
+      bid 名义（:func:`book_depth_ratio` 口径）低于阈值 → veto 降级
+      OBSERVE；比值不可用（盘口档深/价格缺失）→ 同样降级观察；
+    - 两参数均 None（默认）→ 返回基础判定原样，逐字段一致
+      （零回归，test_decisions 锚定）。
 
-    ``score`` 由调用方经 features.reversal_score 计算（回测与实盘
-    同一计算源）；本函数保持纯判定、不 import features（防环）。
+    ``score``/``depth_ratio`` 由调用方计算（回测与实盘同一计算源）；
+    本函数保持纯判定、不 import features（防环）。
     """
     base = decide_entry(elapsed, cand, ask, ask_size, rng, p,
                         min_size=min_size)
-    if p.min_reversal_score is None or base.action is not EntryAction.ENTER:
+    if base.action is not EntryAction.ENTER:
         return base
-    need = int(p.min_reversal_score)
-    if score is None:
-        return EntryDecision(
-            EntryAction.OBSERVE, "观察(评分不可用)",
-            log=f"[入场检查] … {cand} 反转评分不可用（喂价不新鲜/数据缺失），观察")
-    if score < need:
-        return EntryDecision(
-            EntryAction.OBSERVE, f"观察(评分{score}<{need})",
-            log=f"[入场检查] … {cand} 反转评分 {score} < {need}，观察")
+    if p.min_reversal_score is not None:
+        need = int(p.min_reversal_score)
+        if score is None:
+            return EntryDecision(
+                EntryAction.OBSERVE, "观察(评分不可用)",
+                log=f"[入场检查] … {cand} 反转评分不可用（喂价不新鲜/数据缺失），观察")
+        if score < need:
+            return EntryDecision(
+                EntryAction.OBSERVE, f"观察(评分{score}<{need})",
+                log=f"[入场检查] … {cand} 反转评分 {score} < {need}，观察")
+    if p.min_depth_ratio is not None:
+        if depth_ratio is None:
+            return EntryDecision(
+                EntryAction.OBSERVE, "观察(深度比不可用)",
+                log=f"[入场检查] … {cand} 深度比不可用（盘口档深/价格缺失），观察")
+        if depth_ratio < p.min_depth_ratio:
+            return EntryDecision(
+                EntryAction.OBSERVE,
+                f"观察(深度比{depth_ratio:.2f}<{p.min_depth_ratio})",
+                log=f"[入场检查] … {cand} 深度比 {depth_ratio:.2f}"
+                    f" < {p.min_depth_ratio}，观察")
     return base
 
 

@@ -43,6 +43,7 @@ from pm_arb.strategies.crypto_5m.context import (
 )
 from pm_arb.strategies.crypto_5m.decisions import (
     EntryAction,
+    book_depth_ratio,
     decide_entry,
     decide_entry_v2,
     decide_exit,
@@ -186,6 +187,12 @@ class WindowOrchestrator:
             sl.line(f"反转门控: 评分≥{int(p.min_reversal_score or 0)}"
                     f"（权重 {p.score_weights_path or '内置默认'}）｜"
                     f"评分不可用一律观察（§2.1 护栏）", event=True)
+
+        # b10 深度 veto（min_depth_ratio=None 时完全不启用，零回归）
+        depth_on = p.min_depth_ratio is not None
+        if depth_on:
+            sl.line(f"深度veto: 冷门ask名义/热门bid名义 ≥ {p.min_depth_ratio}｜"
+                    f"比值不可用一律观察（b10 护栏）", event=True)
 
         fills_done = 0  # 累计成交笔数（达到 max_fills 停止）
         realized_pnl = Decimal(0)  # 已止盈平仓的实现盈亏
@@ -370,10 +377,13 @@ class WindowOrchestrator:
                                     fbufs.spot, ud_a, ud_b, fa, fb, b, cand,
                                     float(elapsed))
                                 score = _reversal_score(fsnap, score_w)
+                            # b10：与回测 engine 同一 book_depth_ratio（瞬时盘口）
+                            depth_ratio = book_depth_ratio(b, cand) if depth_on else None
                             d = decide_entry_v2(
                                 elapsed, cand, ask,
                                 (b[cand] or {}).get("ask_size"),
-                                rng, p, min_size=min_size, score=score)
+                                rng, p, min_size=min_size, score=score,
+                                depth_ratio=depth_ratio)
                             if (d.action is EntryAction.ABORT_DATA
                                     or d.action is EntryAction.ABORT_VOL):
                                 sl.line(d.log, event=True)

@@ -114,6 +114,33 @@ def test_depth_short_aborts_window():
     assert res.size == 0
 
 
+def test_depth_ratio_veto_blocks_entry():
+    """b10 深度 veto：默认 tick 深度比 = 0.28×461/(0.72×500) ≈ 0.359。
+
+    阈值 0.40 → 全窗 veto 观察不入场；阈值 0.27 → 正常入场
+    （fail-closed 语义在 test_decisions_v2 锚定）。
+    """
+    ticks = [tick(t) for t in range(80, 300)]
+    p_veto = P.model_copy(update={"min_depth_ratio": Decimal("0.40")})
+    res = replay_window(FakeDS(ticks), mkt("Up"), p_veto)
+    assert res.exit_kind is ExitKind.NO_ENTRY
+    assert res.size == 0
+    p_pass = P.model_copy(update={"min_depth_ratio": Decimal("0.27")})
+    res2 = replay_window(FakeDS(ticks), mkt("Down"), p_pass)
+    assert res2.size == 8
+    assert res2.exit_kind is ExitKind.SETTLE_LOSE
+
+
+def test_depth_ratio_veto_recovery_when_depth_improves():
+    """veto 是观察非放弃：前段深度比不足，后段盘口变深 → 仍可入场。"""
+    ticks = [tick(80, sau=100),          # 0.28×100/360 ≈ 0.078 < 0.27 → veto
+             tick(100, sau=2000)]        # 0.28×2000/360 ≈ 1.56 ≥ 0.27 → 入场
+    p_v = P.model_copy(update={"min_depth_ratio": Decimal("0.27")})
+    res = replay_window(FakeDS(ticks), mkt("Down"), p_v)
+    assert res.size == 8
+    assert res.entry_t == START + 100
+
+
 def test_no_signal_when_ask_out_of_band():
     # ask=0.40 越过 max_entry → 观察不入场
     ticks = [tick(t, au=0.40, ad=0.61) for t in range(80, 300)]

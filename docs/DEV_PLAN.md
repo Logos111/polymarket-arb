@@ -17,7 +17,7 @@
 | 2 | SQLite 存储层 + 结算闭环 | 4/6 | ✅ 主体完成 | 遗留：proxy Safe 赎回（2.5）、trade5m 接 recorder（2.6） |
 | 3 | 回测引擎（HF 数据集版） | 3/4 | 🔄 进行中 | 遗留：实盘日志回放对账（3.4，待自录数据积累） |
 | 4 | 风控最小集 | 4/4 | ✅ 完成 | 放量前置条件已满足；阈值体验证后可调 |
-| 5 | 参数扫描 + 特征工程 + 一致性回归 | 4/6 | 🔄 进行中 | 参数平面已扫完（无解）；5.4 基建完成待积累样本；**5.3 特征工程基建+首轮分桶完成（b09）**，批次 1/2 分析进行中 |
+| 5 | 参数扫描 + 特征工程 + 一致性回归 | 4/6 | 🔄 进行中 | 参数平面已扫完（无解）；5.4 基建完成待积累样本；**5.3 b10 完成（全量重验+真假订单审计：入场侧过滤关闭，maker 出场为唯一剩余通道）** |
 | 6 | 工程卫生与治理 | 4/6 | 🔄 进行中 | 完成：SecretStr/CI/USDC 精度/README；遗留：仓库可见性、trade5m 接 recorder |
 
 状态图例：⬜ 未开始 ｜ 🔄 进行中 ｜ ✅ 完成 ｜ ⏸ 暂缓
@@ -25,7 +25,7 @@
 **当前策略基线参数**（[params.py](../src/pm_arb/strategies/crypto_5m/params.py) 默认值，实盘/回测单一来源）：
 名义 $2.00/窗；入场窗口 [70s, 135s]；入场价 [0.15, 0.30]；止盈 0.99；止损 0（关闭，已被 27 组扫描证伪）；max_vol $30；轮询 2s；ws_fresh 10s / feed_fresh 15s；结算前 60s 停止操作。
 
-**测试基线**：pytest **197 项**全绿（194 passed + 3 skipped：duckdb 集成用例仅 <3.14 解释器可跑）；ruff 零警告。
+**测试基线**：pytest **205 项**全绿（202 passed + 3 skipped：duckdb 集成用例仅 <3.14 解释器可跑）；ruff 零警告。
 
 ---
 
@@ -132,6 +132,7 @@ src/pm_arb/strategies/crypto_5m/backtest/
 | 27 组止损扫描 | 83% 持仓触发止损且全部更差 → 止损假设证伪，stop_loss_price 默认 0 | grid_runs.csv |
 | b07 max_vol 现货过滤 | BTC 减亏 54%（基线 -$2,479.86 → mv20/until=100：-$720.02，过滤 59% 窗口）；ETH 未触发（-$777.10 不变，TWAP60 波幅占比 0.5% 极少超 $20）；合计 -$1,497.12 | backtest-report-b07.md |
 | **根因** | 冷门方入场均价 ~0.27，盈亏平衡胜率需 27%，实际 23.5~25.1%；**定价劣势 2~4 个点，非执行/调参问题** | 各报告汇总 |
+| **b10 全量重验 + 真假订单审计（P0~P4）** | 175 子集选择偏差实锤（方向不对称 8 倍/slope 0.665/单规则 39.4% 全部在全量上消失）；入场侧过滤空间系统性不存在：AUC~0.55、单规则无转正、误杀回收无空间、**max_vol 下探滤好单**（被滤组胜率 28~29% > 保留组）、depth veto 减亏不转正、rolling 8 配置全未超线（单段依赖）；**120s 慢反弹（ret120 +0.096）唯一正发现 → maker 出场唯一剩余通道** | backtest-report-b10-final.md |
 
 ---
 
@@ -168,7 +169,7 @@ I/O 聚合集中在 `RiskGate` 装配层（依赖全部可注入，回测传 Non
 | 5.5 验证标准与数据口径 | 🔄 已成纪律 | 见 5.5 |
 | 5.6 一致性回归 | 🔄 持续 | 每次实盘留录制数据，定期重放核对引擎与线上决策一致（依赖 2.6、3.4） |
 
-### 5.3 特征工程：从参数平面转向新信息维度（v1.5 新增；**b09 四轮 v2.6**）
+### 5.3 特征工程：从参数平面转向新信息维度（v1.5 新增；**b09 四轮 v2.6；b10 全量重验+真假订单审计 v2.7**）
 
 **实施计划**：[b09_reversal_feature_engine_plan.md](b09_reversal_feature_engine_plan.md)（v2 合并版，吸收优化方案 + 工程落地方案）。
 
@@ -201,7 +202,9 @@ I/O 聚合集中在 `RiskGate` 装配层（依赖全部可注入，回测传 Non
 
 **出场实验 + ETH 等比修正（2026-09-14 四轮，[报告](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-exit.md)）**：新增 take_profit_multiple 相对止盈（入场价×multiple 封顶 0.99，默认 None 零回归，实盘/回测共用 decide_exit）+ grid 二维 score×multiple×2 币 + **ETH max_vol 等比修正 $20→$0.65**（用户估算）。结果：①**出场实验证伪**——验证段排名前 2 均 multiple=None，ETH 全部 10 个出场组大幅恶化（-0.155→-0.285~-0.414），与止损证伪同构（“落袋买不回尾部”）：双边 taker 费 + 截断结算尾部赢家，taker 口径下出场重排已无空间；②ETH 等比修正生效且显著（基线 -0.2091→-0.1553，入场削 57%）；③**ETH × score=2 首现正值 +0.0585**（n=220<384 不足采信）；④上线判定仍不达标（合并 per -0.046、胜率超线 1pp<1 SE）。**take_profit_multiple 维持 None，出场维度关闭，转向 maker（结构性省费）与 ETH 刻度标定**。
 
-**待办（5.3 剩余）**：ETH max_vol 刻度扫描（0.4~1.0）+ ETH 特征级分桶复跑 → maker 出场/入场方向（出场改良唯一剩余通道）→ 真 OOS 校准 + rolling walk-forward（多 fold 验证 ETH score=2 +0.0585 稳定性）→ 方向不对称专项；暂定项清单见 b09 计划 §2。
+**b10 真假订单识别与高精度过滤（2026-09-15 P0~P4 完成，[总报告](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b10-final.md)）**：①**P0 全量重验实锤 175 子集选择偏差**——方向不对称 8 倍/slope AUC 0.665/单规则 39.4% 在全量（BTC 14,226 窗口）上全部消失，b09 首轮证据链中仅 depth 方向与 120s 慢反弹存活；②P1 candidate_orders 全量数据集（BTC 184,391/ETH 139,490 行，GPT 文档 §18 工程形态）；③P2 画像：分离度跨币种坍塌（AUC 0.552/0.554）、hard-neg 无缺失特征、**误杀回收证伪**（早窗/带外高价均为口径混杂）；④P3：**max_vol 下探滤好单**（被滤组胜率 28~29% > 保留组，b07 BTC=20 确认底部最优）+ depth veto 0.27 减亏不转正（`min_depth_ratio` 已接线默认 None）；⑤P4 rolling 8 配置全未超线（EV>0 fold 仅 1~2/5，单段依赖），ETH relative_obi≥1 唯一转正规则滚动检验证伪；⑥**上线判定：全部不上线，参数默认值零变更**；唯一正发现 120s 慢反弹（深跌桶 ret120 +0.096）的货币化通道＝maker 出场，登记为下一优先。
+
+**待办（5.3 剩余）**：**maker 出场设计**（post-only 挂单成交率/逆行兑底/价格梯度；P5 录制流估算成交率，HF 无逐笔成交只能保守上界）→ P5 录制数据积累 ≥2~4 周 + WindowMeta 24h 稳定性观察 → 模拟实盘判定（与策略侧达标双卡点）。（b09 遗留待办已全部处置：ETH max_vol 刻度扫描✅（0.4 有害）、ETH 特征级分桶✅（P2）、rolling walk-forward✅（P4）、方向不对称专项已证伪（P0 四象限收敛）、ETH score=2 +0.0585 已归档为小样本噪声）
 
 ### 5.4 人工判断信号系统化记录（v1.5 新增；✅ 基建完成 v2.2）
 
@@ -288,3 +291,4 @@ I/O 聚合集中在 `RiskGate` 装配层（依赖全部可注入，回测传 Non
 | 2026-09-14 | v2.4 | **5.3 批次 1/2 全量分桶 + 复合条件 + 评分规则 v2 校准（b09 二轮）**：①批次 1（Trend/Momentum/Extreme 18 特征）：Trend 族全线负单调（现货越涨冷门越差）、momentum_decay ρ=-0.90、胜率 U 型；②批次 2（Token/Favorite/Cross 15 特征）：ud_delta 全族 ρ=-0.60~-1.00（冷门深跌→短线反弹，本数据集最干净信号）、fav 为镜像不独立、divergence Q5 路径/胜率彻底分裂（ret60 +0.10 vs 胜率 16.7%）；③mfe_60 口径复核方向一致；④新增 scripts/feature_cond_stats.py 复合条件统计：深反转+动能 ret60 +0.1606（基准 -0.0015）、现货下行侧 +0.2980、极薄深度胜率 13.6%；⑤评分 v2：ud 项方向翻转（原“被买入→+2”被证伪）、obi_improve 0.05→0.5、新增薄深度罚与动能加分，min_reversal_score 默认仍 None（未经 walk-forward 不上线）；⑥已知不对称（现货跌 ret60 +0.24 vs 涨 +0.03 但胜率反向）暂不入规则。测试 187→188 passed（+1 v2 项专测） |
 | 2026-09-14 | v2.5 | **5.3 评分门控 walk-forward 阈值标定（b09 三轮）：未达上线纪律，门控默认关闭**：①引擎接线：replay_ticks 评分门控（min_reversal_score≠None 时自窗口首 tick 维护 WindowFeatureBufs → decide_entry_v2，与实盘 orchestrator 同口径；默认 None 走原路径零回归）+ replay_window/run_grid 传 twap_seq + run.py fail-fast 断言；②grid.py 换轴 min_reversal_score∈{None,1..7} × BTC/ETH（--spot，固定参数取 b07 最优）；③结果：门控方向正确（score≥1 验证段 BTC 减亏 49%、ETH 扭亏 +0.0166）但合并胜率 27.9% 仅超盈亏线 0.9pp（<1 SE）且存在校准泄漏（评分阈值在全量含验证段上标定）→ **min_reversal_score 维持 None**；④机理结论：评分排序的是路径收益而非结算胜率，score≥2 起单调恶化，2x 止盈出场实验成为最大杠杆。测试 188→192 passed（+4 门控测试：score=5 合成场景精确入场/基线零回归/无 spot fail-closed/门控关闭路径不变） |
 | 2026-09-14 | v2.6 | **5.3 出场实验证伪 + ETH 等比波动修正（b09 四轮）：taker 口径下出场无空间，参数空间杠杆耗尽**：①新增 take_profit_multiple 相对止盈（入场价×multiple 封顶 0.99；decide_exit 扩展可选 entry_ask，默认 None 零回归，实盘 orchestrator 传成交均价同源接线）；②grid 二维 score{None,1,2}×multiple{None,1.5,2,2.5,3}×2 币 + SYMBOL_MAX_VOL 分币种覆写（ETH $20→$0.65 价格等比，用户估算，修正 $20 从不触发的刻度错误）；③**出场实验证伪**：验证段排名前 2 均 multiple=None，ETH 全部 10 个出场组大幅恶化（-0.155→-0.285~-0.414，出场越早越差），机理＝双边 taker 费占比高达 26%+截断结算尾部赢家，与止损证伪同构（“落袋买不回尾部”）；④ETH 等比修正显著（基线验证段 -0.2091→-0.1553，入场削 57%），ETH×score=2 首现 +0.0585（n=220 不足采信）；⑤上线判定仍不达标，take_profit_multiple 维持 None，出场维度关闭，剩余路线＝maker 省费/ETH 刻度标定/真 OOS。测试 192→194 passed（+2：decide_exit multiple 语义/引擎相对止盈与口径区分） |
+| 2026-09-15 | v2.7 | **b10 真假订单识别与高精度过滤（P0~P4 完成）：入场侧过滤空间系统性不存在，maker 出场为唯一剩余通道**：①P0 全量重验实锤 175 子集选择偏差（方向不对称 8 倍/slope 0.665/单规则 39.4% 全部消失；depth 弱复现；**120s 慢反弹 ret120 +0.096 唯一正发现**）；②P1 candidate_orders 全量数据集（BTC 184,391/ETH 139,490 行）+ P2 画像审计（AUC~0.55 坍塌、hard-neg 无缺失特征、**误杀回收证伪**）；③P3 网格：**max_vol 下探滤好单**（被滤组胜率 28~29% > 保留组，b07 BTC=20 底部最优确认）+ depth veto 减亏不转正（新增 `min_depth_ratio` 参数 + `book_depth_ratio` + decide_entry_v2 双门控，engine/orchestrator 同源接线，默认 None 零回归）；④P4 rolling 8 配置全未超线（单段依赖）+ ETH relative_obi≥1 滚动证伪；⑤**上线判定：全部不上线，参数默认值零变更**；⑥P5 录制链路：httpx 连接池僵死根因定位 + 重启止血 + record_ticks gamma_broken 自愈重建（market 流恢复写入）。正式脚本 6 个进 scripts/（make_candidate_orders/candidate_profile/depth_revalidation/maxvol_depth_grid/rule_rolling_check/rolling_walkforward），临时探针已清；报告 4 份进 runtime/。测试 194→202 passed（+8：v2 深度门控 6 项 + book_depth_ratio 除零防护 + 引擎 veto/recovery 2 项） |

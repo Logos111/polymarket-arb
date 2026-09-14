@@ -29,6 +29,7 @@ from pm_arb.data.series_buffer import SeriesBuffer
 from ..context import WindowFeatureBufs
 from ..decisions import (
     EntryAction,
+    book_depth_ratio,
     decide_entry,
     decide_entry_v2,
     decide_exit,
@@ -103,15 +104,22 @@ def replay_ticks(
     判定时算 reversal_score 交给 decide_entry_v2；None（默认）走
     decide_entry 原路径，零回归。门控需调用方传 twap_seq（无现货 →
     score=None → fail-closed 全部 OBSERVE）。
+
+    深度门控（b10 P3）：``p.min_depth_ratio`` 非 None 时启用——判定时
+    用当前 tick 瞬时盘口算 book_depth_ratio（冷门方 ask 名义/热门方
+    bid 名义，与实盘 orchestrator 同一计算源）交给 decide_entry_v2；
+    比值不可用（档深/价格缺失）→ fail-closed 降级观察。两门控独立
+    启停，均默认关（零回归，test_hf_engine 锚定）。
     """
     res = WindowResult(
         symbol="", slug=mkt.slug, outcome=mkt.outcome,
         exit_kind=ExitKind.NO_ENTRY,
     )
     position = None   # (cand, entry_ask, size, entry_t)
-    gate = p.min_reversal_score is not None
-    fbufs = WindowFeatureBufs() if gate else None
-    score_w = load_score_weights(p.score_weights_path) if gate else None
+    score_gate = p.min_reversal_score is not None
+    depth_gate = p.min_depth_ratio is not None
+    fbufs = WindowFeatureBufs() if score_gate else None
+    score_w = load_score_weights(p.score_weights_path) if score_gate else None
     if capture is not None:
         capture.start_window()
 
@@ -136,18 +144,22 @@ def replay_ticks(
             if ask is None:
                 continue
             ask_size = book[cand]["ask_size"]
-            if fbufs is not None:
-                # 与实盘 orchestrator 同一计算源（context.WindowFeatureBufs
-                # + features.compute_features + reversal_score）
-                fav = "Down" if cand == "Up" else "Up"
-                ud_a, ud_b = fbufs.books.bufs(cand)
-                fa, fb = fbufs.books.bufs(fav)
-                fsnap = compute_features(
-                    fbufs.spot, ud_a, ud_b, fa, fb, book, cand,
-                    float(elapsed))
-                score = reversal_score(fsnap, score_w)
-                dec = decide_entry_v2(elapsed, cand, ask, ask_size, rng, p,
-                                      min_size=min_size, score=score)
+            if score_gate or depth_gate:
+                # b09/b10 门控：评分（需特征缓冲，与实盘 orchestrator 同一
+                # 计算源）与深度比（瞬时盘口）独立启停
+                score = None
+                if fbufs is not None:
+                    fav = "Down" if cand == "Up" else "Up"
+                    ud_a, ud_b = fbufs.books.bufs(cand)
+                    fa, fb = fbufs.books.bufs(fav)
+                    fsnap = compute_features(
+                        fbufs.spot, ud_a, ud_b, fa, fb, book, cand,
+                        float(elapsed))
+                    score = reversal_score(fsnap, score_w)
+                dec = decide_entry_v2(
+                    elapsed, cand, ask, ask_size, rng, p,
+                    min_size=min_size, score=score,
+                    depth_ratio=book_depth_ratio(book, cand) if depth_gate else None)
             else:
                 dec = decide_entry(elapsed, cand, ask, ask_size, rng, p,
                                    min_size=min_size)

@@ -84,100 +84,120 @@ async def run(
     rtds_writers = {s: JsonlWriter(out_dir, f"rtds_{s}") for s in symbols}
     raw_ws = JsonlWriter(out_dir, "raw_ws")
     rtds_tasks: list[asyncio.Task] = []
+    gamma = GammaClient()
+    # 长驻 httpx 连接池在代理节点切换后会整池僵死（2026-09-13 实录：
+    # Clash 切换后 Gamma 查询连续失败 1.5 天而进程不退出，WS 侧因自带
+    # 重连而自愈）——窗口发现全失败时置位，下窗口重建客户端。
+    gamma_broken = False
     try:
-        async with GammaClient() as gamma:
-            # RTDS 常驻任务（结算同源 TWAP，与窗口无关）
+        # RTDS 常驻任务（结算同源 TWAP，与窗口无关）
+        for s in symbols:
+            w = rtds_writers[s]
+
+            def rtds_sink(data: dict, _w: JsonlWriter = w) -> None:
+                _w.write({"type": "RtdsUpdate", "payload": data.get("payload")})
+
+            feed = RtdsTwapFeed(s, on_raw=rtds_sink)
+            rtds_tasks.append(asyncio.create_task(feed.run()))
+        log.info("record_started", symbols=symbols, out=out_dir)
+
+        raw_counter = 0
+
+        def raw_frame_sink(raw: str) -> None:
+            nonlocal raw_counter
+            raw_counter += 1
+            if raw_sample > 1 and raw_counter % raw_sample != 1:
+                return
+            raw_ws.write({"type": "RawFrame", "frame": raw[:RAW_FRAME_MAX],
+                          "truncated": len(raw) > RAW_FRAME_MAX})
+
+        def conn_sink(etype: str, detail: dict) -> None:
+            market_rec.record_raw(etype, {"detail": dict(detail)})
+
+        while True:
+            # ---- 对齐到窗口起点 ----
+            ws_start = current_window_start()
+            if time.time() - ws_start > LEAD_SECONDS:
+                # 当前窗口已进行超过引导期 → 等下一个完整窗口
+                ws_start += WINDOW_SECONDS
+                partial = False
+                await asyncio.sleep(ws_start - LEAD_SECONDS - time.time())
+            else:
+                # 刚开窗不久，直接录剩余段（partial 标注）
+                partial = True
+            deadline = ws_start + WINDOW_SECONDS + TAIL_SECONDS
+
+            # ---- 窗口发现（起点后重试；显式传 ws，边界竞态教训）----
+            # 自愈：上一窗口全 symbol 查询异常耗尽重试 → 重建 Gamma
+            # 客户端（换新连接池），应对代理切换后的僵死池。
+            if gamma_broken:
+                with contextlib.suppress(Exception):
+                    await gamma.close()
+                gamma = GammaClient()
+                gamma_broken = False
+                log.warning("record_gamma_client_rebuilt")
+            markets: dict[str, Market] = {}
+            lookup_fail = 0
             for s in symbols:
-                w = rtds_writers[s]
+                for _ in range(6):
+                    try:
+                        m = await get_window_market(gamma, s, ws_start)
+                    except Exception as e:
+                        log.warning("record_window_lookup_failed",
+                                    symbol=s,
+                                    error=f"{type(e).__name__}: "
+                                          f"{str(e)[:100]}")
+                        m = None
+                        lookup_fail += 1
+                    if m is not None:
+                        markets[s] = m
+                        break
+                    await asyncio.sleep(5)
+            if not markets and lookup_fail:
+                gamma_broken = True
 
-                def rtds_sink(data: dict, _w: JsonlWriter = w) -> None:
-                    _w.write({"type": "RtdsUpdate", "payload": data.get("payload")})
+            feeds: list[MarketDataFeed] = []
+            meta_syms: dict[str, list[str]] = {}
+            for s, m in markets.items():
+                up, down = up_down_tokens(m)
+                meta_syms[s] = [up, down]
+                feeds.append(MarketDataFeed(
+                    [up, down], recorder=market_rec,
+                    on_conn_event=conn_sink, on_raw_frame=raw_frame_sink,
+                ))
 
-                feed = RtdsTwapFeed(s, on_raw=rtds_sink)
-                rtds_tasks.append(asyncio.create_task(feed.run()))
-            log.info("record_started", symbols=symbols, out=out_dir)
+            market_rec.record_raw("WindowMeta", {
+                "window_start": ws_start, "partial": partial,
+                "symbols": meta_syms,
+                "missing": [s for s in symbols if s not in markets],
+            })
+            log.info("record_window", window_start=ws_start, partial=partial,
+                     found=list(markets))
 
-            raw_counter = 0
-
-            def raw_frame_sink(raw: str) -> None:
-                nonlocal raw_counter
-                raw_counter += 1
-                if raw_sample > 1 and raw_counter % raw_sample != 1:
-                    return
-                raw_ws.write({"type": "RawFrame", "frame": raw[:RAW_FRAME_MAX],
-                              "truncated": len(raw) > RAW_FRAME_MAX})
-
-            def conn_sink(etype: str, detail: dict) -> None:
-                market_rec.record_raw(etype, {"detail": dict(detail)})
-
-            while True:
-                # ---- 对齐到窗口起点 ----
-                ws_start = current_window_start()
-                if time.time() - ws_start > LEAD_SECONDS:
-                    # 当前窗口已进行超过引导期 → 等下一个完整窗口
-                    ws_start += WINDOW_SECONDS
-                    partial = False
-                    await asyncio.sleep(ws_start - LEAD_SECONDS - time.time())
-                else:
-                    # 刚开窗不久，直接录剩余段（partial 标注）
-                    partial = True
-                deadline = ws_start + WINDOW_SECONDS + TAIL_SECONDS
-
-                # ---- 窗口发现（起点后重试；显式传 ws，边界竞态教训）----
-                markets: dict[str, Market] = {}
-                for s in symbols:
-                    for _ in range(6):
-                        try:
-                            m = await get_window_market(gamma, s, ws_start)
-                        except Exception as e:
-                            log.warning("record_window_lookup_failed",
-                                        symbol=s, error=str(e)[:100])
-                            m = None
-                        if m is not None:
-                            markets[s] = m
-                            break
-                        await asyncio.sleep(5)
-
-                feeds: list[MarketDataFeed] = []
-                meta_syms: dict[str, list[str]] = {}
-                for s, m in markets.items():
-                    up, down = up_down_tokens(m)
-                    meta_syms[s] = [up, down]
-                    feeds.append(MarketDataFeed(
-                        [up, down], recorder=market_rec,
-                        on_conn_event=conn_sink, on_raw_frame=raw_frame_sink,
-                    ))
-
-                market_rec.record_raw("WindowMeta", {
-                    "window_start": ws_start, "partial": partial,
-                    "symbols": meta_syms,
-                    "missing": [s for s in symbols if s not in markets],
-                })
-                log.info("record_window", window_start=ws_start, partial=partial,
-                         found=list(markets))
-
-                # ---- 录满一窗口 ----
-                await record_until(feeds, deadline)
-                market_rec.flush()
-                for w in rtds_writers.values():
-                    w.flush()
-                raw_ws.flush()
-                # 内存自监控：每窗口记录一次 RSS/峰值，超阈值告警。
-                # 泄漏早期是每小时几 MB 的爬升，只能靠趋势发现。
-                cur, peak = rss_mb()
-                extra = {"rss_mb": round(cur, 1), "peak_mb": round(peak, 1)}
-                if cur < 0:
-                    log.warning("record_mem_unavailable")
-                elif cur > mem_cap_mb:
-                    log.warning("record_mem_high", cap_mb=mem_cap_mb, **extra)
-                else:
-                    log.info("record_mem", **extra)
-                log.info("record_window_done", window_start=ws_start,
-                         market_lines=market_rec.lines_written)
+            # ---- 录满一窗口 ----
+            await record_until(feeds, deadline)
+            market_rec.flush()
+            for w in rtds_writers.values():
+                w.flush()
+            raw_ws.flush()
+            # 内存自监控：每窗口记录一次 RSS/峰值，超阈值告警。
+            # 泄漏早期是每小时几 MB 的爬升，只能靠趋势发现。
+            cur, peak = rss_mb()
+            extra = {"rss_mb": round(cur, 1), "peak_mb": round(peak, 1)}
+            if cur < 0:
+                log.warning("record_mem_unavailable")
+            elif cur > mem_cap_mb:
+                log.warning("record_mem_high", cap_mb=mem_cap_mb, **extra)
+            else:
+                log.info("record_mem", **extra)
+            log.info("record_window_done", window_start=ws_start,
+                     market_lines=market_rec.lines_written)
     finally:
         for t in rtds_tasks:
             t.cancel()
         await asyncio.gather(*rtds_tasks, return_exceptions=True)
+        with contextlib.suppress(Exception):
+            await gamma.close()
         market_rec.close()
         for w in rtds_writers.values():
             w.close()

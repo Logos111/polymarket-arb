@@ -44,6 +44,16 @@ class Crypto5mParams(BaseModel):
                                                 # ScoreWeights 默认）；非数字字段，
                                                 # 不入 --param 覆盖范围
 
+    # ---- b10 深度 veto（默认关 = 现行为字节级不变）----
+    min_depth_ratio: Decimal | None = None   # ENTER 需冷门方 ask 名义 /
+                                                # 热门方 bid 名义（top-of-book）
+                                                # ≥ 此值（b10 P0 全量重验：唯一
+                                                # 跨币种方向复现的结构信号，
+                                                # 0.27 阈值两侧胜率差 5~7pp）；
+                                                # None = 不启用（零回归）；比值
+                                                # 不可用（档深/价格缺失）一律
+                                                # 降级观察，绝不放行
+
 
 def parse_overrides(items: list[str] | None) -> dict[str, Decimal | int]:
     """解析 ``--param k=v`` 列表为 model_copy(update=...) 字典（CLI 单一来源）。
