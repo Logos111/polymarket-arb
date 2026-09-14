@@ -4,7 +4,7 @@
 > + [crypto_5m_underdog_特征工程_工程落地方案.md](../src/pm_arb/strategies/crypto_5m_underdog_特征工程_工程落地方案.md)（工程落地方案，工程判断）
 > + b09 v1 计划（本文档上一版，已合并废弃）。
 > 对应 DEV_PLAN 阶段 5.3（特征工程）+ F1（P0）。
-> 状态：✅ 基建 + 批次 0/1/2 + 评分 v2 校准 + 门控 walk-forward 标定已实施（2026-09-14，见 [批次 0 报告](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-features.md) / [批次 1/2 报告](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-batch12.md) / [三轮报告](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-score-gate.md)）；三轮判定：门控方向正确但胜率不清晰超线，**min_reversal_score 维持 None**；后续路线见三轮报告 §6（真 OOS 校准 / mfe 出场实验 / ETH 分桶 / 不对称专项）
+> 状态：✅ 基建 + 批次 0/1/2 + 评分 v2 + 门控标定 + 出场实验全部实施（2026-09-14，见 [批次 0 报告](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-features.md) / [批次 1/2 报告](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-batch12.md) / [三轮报告](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-score-gate.md) / [四轮报告](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-exit.md)）；四轮总结：门控方向正确但不清晰超线（不开），**出场实验证伪（taker 双边费+截断尾部，持有到结算为 taker 口径上限）**，ETH 等比 max_vol 修正生效且 score=2 首现 +0.0585（样本不足）；后续路线见四轮报告 §6（ETH 刻度扫描 / maker 省费 / 真 OOS）
 
 ## 0. 与 v1 计划的差异（吸收工程落地方案后的修订）
 

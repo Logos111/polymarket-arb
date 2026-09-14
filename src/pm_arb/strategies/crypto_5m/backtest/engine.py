@@ -169,7 +169,7 @@ def replay_ticks(
             bid = book[cand]["best_bid"]
             bid_size = book[cand]["bid_size"]
             if bid is not None and bid_size >= size:
-                if decide_exit(bid, p):
+                if decide_exit(bid, p, entry_ask=entry_ask):
                     cost = size * entry_ask + taker_fee(size, entry_ask)
                     proceeds = size * bid - taker_fee(size, bid)
                     res.exit_kind = ExitKind.TAKE_PROFIT

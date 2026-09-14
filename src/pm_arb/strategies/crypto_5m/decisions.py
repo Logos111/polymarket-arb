@@ -158,9 +158,26 @@ def decide_entry_v2(
     return base
 
 
-def decide_exit(bid: Decimal | None, p: Crypto5mParams) -> bool:
-    """止盈判定：best_bid 达到固定止盈价即卖出（与入场价无关）。"""
-    return bid is not None and bid >= p.take_profit_price
+def decide_exit(bid: Decimal | None, p: Crypto5mParams,
+                entry_ask: Decimal | None = None) -> bool:
+    """止盈判定：best_bid 达到止盈价即卖出。
+
+    两种口径（b09 四轮出场实验）：
+
+    - ``take_profit_multiple`` 为 None（默认）：固定价 ``take_profit_price``
+      （与入场价无关，现行为零回归）；
+    - ``take_profit_multiple`` 非 None 且传入 ``entry_ask``：相对止盈价
+      = ``min(entry_ask × multiple, 0.99)``（封顶 0.99 防越界；entry_ask
+      缺失时 fail-closed 退回固定价口径，绝不放行）。
+
+    实盘 orchestrator 与回测引擎共用本函数（入场价传成交均价/入场 ask）。
+    """
+    if bid is None:
+        return False
+    if p.take_profit_multiple is not None and entry_ask is not None:
+        tp = min(entry_ask * p.take_profit_multiple, Decimal("0.99"))
+        return bid >= tp
+    return bid >= p.take_profit_price
 
 
 def decide_stop(bid: Decimal | None, p: Crypto5mParams) -> bool:

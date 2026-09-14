@@ -17,9 +17,13 @@ class Crypto5mParams(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     target_notional: Decimal = Decimal("2.00")  # 单笔名义金额（美元）
-    entry_after: int = 70                       # 开窗后 70s 起可入场（剩余 3:50）
-    entry_until: int = 135                      # 开窗后 135s 后不再入场（剩余 2:45）
+    entry_after: int = 90                       # 开窗后 90s 起可入场（剩余 3:30）
+    entry_until: int = 150                      # 开窗后 150s 后不再入场（剩余 2:30）
     take_profit_price: Decimal = Decimal("0.99")  # 固定止盈价（与入场价无关）
+    take_profit_multiple: Decimal | None = None  # b09 四轮：相对止盈倍数，
+                                                # 非 None 时止盈价 = min(入场价
+                                                # ×multiple, 0.99)（忽略固定价）；
+                                                # None = 固定价口径（零回归）
     stop_loss_price: Decimal = Decimal("0")     # 固定止损价：best_bid 跌破即市价
                                                 # 卖出；0 = 关闭（默认，保持现行为）
     max_entry: Decimal = Decimal("0.30")        # 冷门方入场价上限（30 点）

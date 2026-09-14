@@ -452,8 +452,13 @@ class WindowOrchestrator:
                             bb = b[side_name].get("best_bid")
                             exit_msg = ""
                             is_stop = False
-                            if decide_exit(bb, p):
-                                exit_msg = f"✅ 止盈: bid {bb} >= {p.take_profit_price}"
+                            if decide_exit(bb, p, entry_ask=entry_price):
+                                tp_show = (
+                                    min(entry_price * p.take_profit_multiple,
+                                        Decimal("0.99"))
+                                    if p.take_profit_multiple is not None
+                                    else p.take_profit_price)
+                                exit_msg = f"✅ 止盈: bid {bb} >= {tp_show}"
                             elif decide_stop(bb, p):
                                 exit_msg = f"🛑 止损: bid {bb} <= {p.stop_loss_price}"
                                 is_stop = True

@@ -24,8 +24,9 @@ P = Crypto5mParams()
 
 def test_params_defaults():
     assert P.target_notional == Decimal("2.00")
-    assert (P.entry_after, P.entry_until) == (70, 135)
+    assert (P.entry_after, P.entry_until) == (90, 150)
     assert P.take_profit_price == Decimal("0.99")
+    assert P.take_profit_multiple is None      # b09 四轮：默认关闭（零回归）
     assert (P.min_entry, P.max_entry) == (Decimal("0.15"), Decimal("0.30"))
     assert P.max_vol == Decimal("30")
     assert (P.poll, P.ws_fresh_sec, P.feed_fresh_sec, P.end_margin) == (2.0, 10.0, 15.0, 60)
@@ -67,7 +68,7 @@ def test_calc_size_rounds_up_and_respects_min():
 def test_decide_entry_wait_and_missed():
     d = decide_entry(30.0, "Up", Decimal("0.28"), None, Decimal("5"), P)
     assert d.action is EntryAction.WAIT
-    assert d.status == "等待 t∈[70,135]"
+    assert d.status == "等待 t∈[90,150]"
     d = decide_entry(200.0, "Up", Decimal("0.28"), None, Decimal("5"), P)
     assert d.action is EntryAction.MISSED
     assert d.status == "已错过"
@@ -76,14 +77,14 @@ def test_decide_entry_wait_and_missed():
 # ---- decide_entry：不可恢复放弃 ----
 
 def test_decide_entry_abort_data():
-    d = decide_entry(80.0, "Up", None, None, None, P)
+    d = decide_entry(100.0, "Up", None, None, None, P)
     assert d.action is EntryAction.ABORT_DATA
     assert d.status == "放弃(数据不全)"
     assert d.log == "[入场检查] 数据不全（ask=None range=None），放弃。"
 
 
 def test_decide_entry_abort_vol():
-    d = decide_entry(80.0, "Up", Decimal("0.28"), None, Decimal("30"), P)
+    d = decide_entry(100.0, "Up", Decimal("0.28"), None, Decimal("30"), P)
     assert d.action is EntryAction.ABORT_VOL
     assert d.status == "放弃(波动$30)"
     assert d.log == "[入场检查] ❌ 波动 $30.00 ≥ $30，放弃。"
@@ -92,14 +93,14 @@ def test_decide_entry_abort_vol():
 # ---- decide_entry：观察（可恢复） ----
 
 def test_decide_entry_observe_high():
-    d = decide_entry(80.0, "Up", Decimal("0.31"), None, Decimal("5"), P)
+    d = decide_entry(100.0, "Up", Decimal("0.31"), None, Decimal("5"), P)
     assert d.action is EntryAction.OBSERVE
     assert d.status == "观察(ask0.31≥0.30)"
     assert "≥ 0.30，观察" in d.log
 
 
 def test_decide_entry_observe_cold():
-    d = decide_entry(80.0, "Up", Decimal("0.13"), None, Decimal("5"), P)
+    d = decide_entry(100.0, "Up", Decimal("0.13"), None, Decimal("5"), P)
     assert d.action is EntryAction.OBSERVE
     assert d.status == "观察(ask0.13≤0.15过冷)"
     assert "过冷观察" in d.log
@@ -108,7 +109,7 @@ def test_decide_entry_observe_cold():
 # ---- decide_entry：信号成立（实盘锚定 09-11 01:55 窗口场景） ----
 
 def test_decide_entry_enter():
-    d = decide_entry(80.0, "Up", Decimal("0.280"), 461, Decimal("24.61"), P)
+    d = decide_entry(100.0, "Up", Decimal("0.280"), 461, Decimal("24.61"), P)
     assert d.action is EntryAction.ENTER
     assert d.size == 8  # ceil(2.00/0.280)=8
     assert d.log == ("[入场检查] ✅ Up ask= 0.280（档深461份） 波动$24.61"
@@ -121,6 +122,22 @@ def test_decide_exit_threshold():
     assert not decide_exit(Decimal("0.98"), P)
     assert decide_exit(Decimal("0.99"), P)
     assert not decide_exit(None, P)
+
+
+def test_decide_exit_multiple():
+    """b09 四轮相对止盈：tp = min(entry×multiple, 0.99)，与固定价互斥。"""
+    p2 = P.model_copy(update={"take_profit_multiple": Decimal("2")})
+    # 入场 0.25 → tp=0.50：0.49 不出、0.50 出（固定价 0.99 被忽略）
+    assert not decide_exit(Decimal("0.49"), p2, entry_ask=Decimal("0.25"))
+    assert decide_exit(Decimal("0.50"), p2, entry_ask=Decimal("0.25"))
+    # 不传 entry_ask → fail-closed 退回固定价口径（0.50 < 0.99 不出）
+    assert not decide_exit(Decimal("0.50"), p2)
+    # 高倍数封顶 0.99：0.30×4=1.2 → tp=0.99
+    p4 = P.model_copy(update={"take_profit_multiple": Decimal("4")})
+    assert not decide_exit(Decimal("0.98"), p4, entry_ask=Decimal("0.30"))
+    assert decide_exit(Decimal("0.99"), p4, entry_ask=Decimal("0.30"))
+    # bid=None 永不出场
+    assert not decide_exit(None, p2, entry_ask=Decimal("0.25"))
 
 
 # ---- decide_stop ----

@@ -79,6 +79,33 @@ def test_settle_win_but_take_profit_intercepts():
     assert res.fee == fees
 
 
+def test_take_profit_multiple_relative_exit():
+    """b09 四轮：相对止盈 2x —— 入场 0.28 → tp=0.56，低于固定价 0.65 即出场。"""
+    p2 = P.model_copy(update={"take_profit_multiple": Decimal("2")})
+    ticks = [tick(80), tick(90, au=0.50, bu=0.49), tick(100, au=0.70, bu=0.68)]
+    res = replay_window(FakeDS(ticks), mkt("Up"), p2)
+    assert res.exit_kind is ExitKind.TAKE_PROFIT
+    # t=90 bid=0.49 < 0.56 不出；t=100 bid=0.68 ≥ 0.56 出（若固定价口径
+    # 也在 0.68 出，但触发价由 2x 决定——用 0.49<0.56 区分两种口径）
+    assert res.entry_t == START + 80
+    gain = Decimal(8) * (Decimal("0.68") - Decimal("0.28"))
+    fees = taker_fee(8, Decimal("0.28")) + taker_fee(8, Decimal("0.68"))
+    assert res.pnl == gain - fees
+    # 口径区分：bid=0.55 —— 2x 口径下 0.55 < 0.56 不出场 → 持有到结算赢；
+    # 若固定价口径误生效（0.55 < 0.65 同样不出），无法区分，改用下条验证
+    ticks_mid = [tick(80), tick(90, au=0.50, bu=0.55)]
+    assert replay_window(FakeDS(ticks_mid), mkt("Up"), p2).exit_kind \
+        is ExitKind.SETTLE_WIN
+    # 固定价口径同数据也不出（0.55<0.65）→ 用 bid=0.60 区分：
+    # 2x 口径 0.60≥0.56 出，固定价 0.60<0.65 不出
+    ticks_hi = [tick(80), tick(90, au=0.56, bu=0.60)]
+    assert replay_window(FakeDS(ticks_hi), mkt("Up"), p2).exit_kind \
+        is ExitKind.TAKE_PROFIT
+    assert replay_window(FakeDS(ticks_hi), mkt("Up"), P).exit_kind \
+        is ExitKind.SETTLE_WIN
+
+
+
 def test_depth_short_aborts_window():
     # 档深 3 < 目标 8 份 → 保守放弃整窗
     ticks = [tick(80, sau=3)]

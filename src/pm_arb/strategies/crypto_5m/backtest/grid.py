@@ -32,21 +32,30 @@ from .spot_vol import SpotVol
 TRAIN_FRAC = 0.7
 
 # ── 网格定义（笛卡尔积；改这里即可调参）──────────────────────
-# b09 三轮：评分门控阈值扫描（reversal_score v2 已按分桶证据校准）。
-# 基线行 min_reversal_score=None（门控关闭）与后续行同口径对照，
-# 差分即门控增量。固定参数取 b07 最优（mv=20/until=100）+ 上轮价格带；
-# 门控需 --spot（无现货 → fail-closed 零入场，run_grid 会传 twap_seq）。
+# b09 四轮：score × 出场倍数二维 walk-forward（全计划最大杠杆：
+# 三轮已证评分排序的是路径而非结算，相对止盈是唯一没试过的大杠杆）。
+# 轴：min_reversal_score ∈ {None,1,2} × take_profit_multiple ∈
+# {None,1.5,2,2.5,3}（None = 旧口径：关门控 / 固定价 0.99 拿到结算）。
+# (None,None) = 完整基线行；差分分别给出门控增量 / 出场增量 / 二维叠加。
+# 门控需 --spot（无现货 → fail-closed 零入场）。
 AXES: dict[str, list] = {
-    "min_reversal_score": [None, 1, 2, 3, 4, 5, 6, 7],
+    "min_reversal_score": [None, 1, 2],
+    "take_profit_multiple": [None, Decimal("1.5"), Decimal("2"),
+                             Decimal("2.5"), Decimal("3")],
 }
-# 固定参数（不进网格）：入场价带与止盈取上轮 60 组扫描最优；
+# 固定参数（不进网格）：价格带/入场窗口取上轮；max_vol 分币种（见下）
+# ——ETH $20 从不触发（b07 实测），按价格比例设 0.65（用户估算）；
 # 止损已证伪固定关闭（stop_loss_price 默认 0）。
 FIXED: dict[str, Decimal | int] = {
-    "take_profit_price": Decimal("0.99"),
+    "take_profit_price": Decimal("0.99"),   # multiple=None 时生效
     "min_entry": Decimal("0.20"),
     "max_entry": Decimal("0.30"),
-    "max_vol": Decimal("20"),
     "entry_until": 100,
+}
+# 分币种 max_vol：BTC 取 b07 最优 $20；ETH 等比修正 $0.65（用户估算）
+SYMBOL_MAX_VOL: dict[str, Decimal] = {
+    "btc": Decimal("20"),
+    "eth": Decimal("0.65"),
 }
 SYMBOLS = ["btc", "eth"]
 
@@ -74,10 +83,12 @@ def _shards(items: list, n: int) -> list[list]:
 
 
 def _run_shard(symbol: str, params_shard: list[Crypto5mParams], use_spot: bool):
-    """worker：加载数据一次，跑一片参数组。"""
+    """worker：加载数据一次，跑一片参数组（max_vol 按 symbol 覆写）。"""
     ds = HfDataset(symbol)
     spot = SpotVol(symbol) if use_spot else None
-    return symbol, run_grid(ds, params_shard, spot=spot)
+    mv = SYMBOL_MAX_VOL[symbol]
+    shard = [pp.model_copy(update={"max_vol": mv}) for pp in params_shard]
+    return symbol, run_grid(ds, shard, spot=spot)
 
 
 def _stats(results: list[WindowResult]) -> dict:
