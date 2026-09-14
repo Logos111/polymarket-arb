@@ -1,6 +1,6 @@
 # 开发计划与项目进程（活文档）
 
-> 版本：v2.4 ｜ 日期：2026-09-14
+> 版本：v2.5 ｜ 日期：2026-09-14
 > **本文档是项目的方向与进展跟踪文档，实施过程中随进度持续更新。**
 > v2.0 起每阶段采用统一结构：**目标 / 交付物（文件级）/ 完成判据 / 验证证据 / 遗留项**；
 > 全部进度声明已经过对本地代码、测试与 pyproject 入口的逐条核查。
@@ -25,7 +25,7 @@
 **当前策略基线参数**（[params.py](../src/pm_arb/strategies/crypto_5m/params.py) 默认值，实盘/回测单一来源）：
 名义 $2.00/窗；入场窗口 [70s, 135s]；入场价 [0.15, 0.30]；止盈 0.99；止损 0（关闭，已被 27 组扫描证伪）；max_vol $30；轮询 2s；ws_fresh 10s / feed_fresh 15s；结算前 60s 停止操作。
 
-**测试基线**：pytest **191 项**全绿（188 passed + 3 skipped：duckdb 集成用例仅 <3.14 解释器可跑）；ruff 零警告。
+**测试基线**：pytest **195 项**全绿（192 passed + 3 skipped：duckdb 集成用例仅 <3.14 解释器可跑）；ruff 零警告。
 
 ---
 
@@ -163,12 +163,12 @@ I/O 聚合集中在 `RiskGate` 装配层（依赖全部可注入，回测传 Non
 |---|---|---|
 | 5.1 样本量与每日报表 | 🔄 持续 | pm-record 24/7 积累 + pm-backfill 放大结算样本；每日胜率/EV 报表与置信区间（p=0.5±0.05 需 ~384 入场样本） |
 | 5.2 参数网格 + walk-forward | ✅ 首轮完成 | 见 3.2；**结论：价格/波动/止盈/止损参数平面内无解**，同平面继续微调不再投入 |
-| 5.3 特征工程（新信息维度） | 🔄 批次 0/1/2 完成 | 见 5.3 详表（b09：计算层全量建齐 + 三批次分桶 + 评分 v2 校准；待 walk-forward） |
+| 5.3 特征工程（新信息维度） | 🔄 批次 0/1/2 + 门控 walk-forward 完成 | 见 5.3 详表（b09：计算层全量建齐 + 三批次分桶 + 评分 v2 校准 + 阈值标定**未达上线纪律**，门控默认关闭） |
 | 5.4 人工判断信号系统化 | ✅ 基建完成 | 见 5.4（待积累样本） |
 | 5.5 验证标准与数据口径 | 🔄 已成纪律 | 见 5.5 |
 | 5.6 一致性回归 | 🔄 持续 | 每次实盘留录制数据，定期重放核对引擎与线上决策一致（依赖 2.6、3.4） |
 
-### 5.3 特征工程：从参数平面转向新信息维度（v1.5 新增；**b09 三批次+评分 v2 v2.4**）
+### 5.3 特征工程：从参数平面转向新信息维度（v1.5 新增；**b09 三轮 v2.5**）
 
 **实施计划**：[b09_reversal_feature_engine_plan.md](b09_reversal_feature_engine_plan.md)（v2 合并版，吸收优化方案 + 工程落地方案）。
 
@@ -195,9 +195,11 @@ I/O 聚合集中在 `RiskGate` 装配层（依赖全部可注入，回测传 Non
 
 **首轮证据（BTC 子集 175 窗口，21,961 采集行，批次 0/1/2）**：① relative_obi 单调 ρ=+0.90；② **冷门方自身跌幅 = 全场最强单变量**（ud_delta 全族 ρ=-0.60~-1.00，深跌→未来 60s 中价反弹 +0.10~+0.12，原评分“ud 被买入→+2”方向已证伪并翻转）；③ momentum_decay 动能未衰竭 Q1 ret60 +0.13；④ 极薄深度 dep<0.27 胜率仅 13.6%（现行策略恰在该桶入场率最高）；⑤ 复合条件：深反转+动能 ret60 **+0.1606**（基准 -0.0015），现货下行侧 +0.2980；⑥ 方向不对称（现货跌 ret60 +0.24 vs 涨 +0.03，胜率反向 27.8% vs 33.6%）与持有到结算口径冲突，暂不入规则。详见 [批次 0 报告](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-features.md) / [批次 1/2 报告](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-batch12.md)。
 
-**评分规则 v2 校准（2026-09-14，按上述证据）**：ud_ask_delta_30 翻转为分级加分（≤-0.15→+2 / ≤-0.08→+1）；obi_improve 0.05→0.5；新增极薄深度罚（depth_ratio<0.27→-2）与动能未衰竭加分（momentum_decay≤0.0001→+1）。`min_reversal_score` 默认仍 None——**未经 walk-forward 验证前不进实盘**。
+**评分规则 v2 校准（2026-09-14，按上述证据）**：ud_ask_delta_30 翻转为分级加分（≤-0.15→+2 / ≤-0.08→+1）；obi_improve 0.05→0.5；新增极薄深度罚（depth_ratio<0.27→-2）与动能未衰竭加分（momentum_decay≤0.0001→+1）。
 
-**待办（5.3 剩余）**：score 阈值 walk-forward 接 grid（扫 min_reversal_score，验证段胜率清晰超 27% 才上线）→ ETH 全量复跑 → mfe 口径出场实验（2x 止盈）→ 方向不对称专项验证 → paper trading 对照；暂定项清单见 b09 计划 §2。
+**门控 walk-forward 阈值标定（2026-09-14 三轮，[报告](../src/pm_arb/strategies/crypto_5m/backtest/runtime/backtest-report-b09-score-gate.md)）**：replay_ticks 接评分门控（自窗口首 tick 维护 WindowFeatureBufs → decide_entry_v2，与实盘同口径）+ grid 换轴 min_reversal_score∈{None,1..7} × BTC/ETH。结果：①门控方向正确——score≥1 验证段 vs 基线：BTC per -0.1734→-0.0876（减亏 49%）、ETH -0.2091→**+0.0166**（扭亏），score=0 入场被削减 ~50%；②score≥2 起单调恶化（评分排序的是**路径**而非**结算**）；③**上线判定：不达标**——合并两币验证段胜率 ≈27.9%（n=1,014），仅超 27% 盈亏线 0.9pp（<1 SE）、合并 per 仍负，且评分 v2 阈值在全量（含验证段）上标定存在校准泄漏。**min_reversal_score 维持 None，门控代码就位但不启用**。
+
+**待办（5.3 剩余）**：真 OOS 校准（评分阈值改在训练段重标定→验证段复检）→ mfe 口径出场实验（2x 止盈，本轮再证“评分排序路径非结算”，出场不改则高分价值无法兑现）→ ETH 特征级分桶复跑 → 方向不对称专项验证 → paper trading 对照；暂定项清单见 b09 计划 §2。
 
 ### 5.4 人工判断信号系统化记录（v1.5 新增；✅ 基建完成 v2.2）
 
@@ -282,3 +284,4 @@ I/O 聚合集中在 `RiskGate` 装配层（依赖全部可注入，回测传 Non
 | 2026-09-13 | v2.2 | **阶段 4 风控最小集完成 + 工程卫生四项（b09）**：①risk/gates.py（check_order 纯函数 + RiskGate 装配层，KILL/单笔/单日投入/单日亏损熔断/重复入场/USDC fail-closed/gas 告警，拒绝优先级固定）；②orchestrator ENTER 分支下单前过闸（KILL/熔断中止全部窗口 return 2，其余放弃本窗口），trade5m 装配 live 链上余额/gas 注入；③store.py 增 day_stats（[ds, ds+86400) 半开区间）/has_open_position/mark_redeemed 补 windows 表；④config.py 私钥+L2 凭证改 SecretStr（clob_trader/chain/doctor/setup 四调用方同步）；⑤redeem.py USDC 精度改动态查询；⑥.github/workflows/ci.yml（3.12 + ruff + pytest）+ README 目录图/路线图同步；⑦5.4 基建：data/judgment_log.py（SIGNAL_TAGS 词表 11 标签）+ pm-judgment CLI（append-only JSONL）；测试抓到两真实 bug（balance 异常穿透、day_stats 未来行计入）已修；测试基线 127→147 |
 | 2026-09-13 | v2.3 | **5.3 特征工程基建 + 首轮分桶完成（b09）**：①数据结构：data/series_buffer.py（时间窗双端队列）+ data/book_history.py（双边盘口历史）；②features.py 特征纯函数模块（8 族 22 特征，None 语义纪律：缺数据/超龄/样本不足一律 None）；③labels.py 前视标签（future_return/mfe/mae/final_outcome，仅回测研究管线可用，AST 护栏测试静态隔离）；④回测管线：FeatureCapture 采集窗 + pm-bt5m --capture-features → Parquet（BTC 175 窗口 21,961 行实测）；⑤实盘接线：decisions.decide_entry_v2 评分门控（score None 或 <min → OBSERVE 不放行，默认 None 零回归）+ orchestrator WindowFeatureBufs 每窗口算分；⑥研究脚本：等频 5 分位分桶 + 5×5 二维交叉 + pyproject research 依赖组（只声明不装）。首轮证据：relative_obi 单调 ρ=+0.90（Q5 ret60 +0.047 vs Q1 -0.024）；depth_ratio_underdog 胜率 13.3%→42.0% 单调（候选过滤）；spread 分布退化不可用。测试基线 147→187 passed（+40：11 series_buffer + 12 features + 6 labels/泄漏护栏 + 6 decide_entry_v2 + 5 capture，含 labels 真 bug 修复：缺 cand_ask 时 final_outcome 被跳过） |
 | 2026-09-14 | v2.4 | **5.3 批次 1/2 全量分桶 + 复合条件 + 评分规则 v2 校准（b09 二轮）**：①批次 1（Trend/Momentum/Extreme 18 特征）：Trend 族全线负单调（现货越涨冷门越差）、momentum_decay ρ=-0.90、胜率 U 型；②批次 2（Token/Favorite/Cross 15 特征）：ud_delta 全族 ρ=-0.60~-1.00（冷门深跌→短线反弹，本数据集最干净信号）、fav 为镜像不独立、divergence Q5 路径/胜率彻底分裂（ret60 +0.10 vs 胜率 16.7%）；③mfe_60 口径复核方向一致；④新增 scripts/feature_cond_stats.py 复合条件统计：深反转+动能 ret60 +0.1606（基准 -0.0015）、现货下行侧 +0.2980、极薄深度胜率 13.6%；⑤评分 v2：ud 项方向翻转（原“被买入→+2”被证伪）、obi_improve 0.05→0.5、新增薄深度罚与动能加分，min_reversal_score 默认仍 None（未经 walk-forward 不上线）；⑥已知不对称（现货跌 ret60 +0.24 vs 涨 +0.03 但胜率反向）暂不入规则。测试 187→188 passed（+1 v2 项专测） |
+| 2026-09-14 | v2.5 | **5.3 评分门控 walk-forward 阈值标定（b09 三轮）：未达上线纪律，门控默认关闭**：①引擎接线：replay_ticks 评分门控（min_reversal_score≠None 时自窗口首 tick 维护 WindowFeatureBufs → decide_entry_v2，与实盘 orchestrator 同口径；默认 None 走原路径零回归）+ replay_window/run_grid 传 twap_seq + run.py fail-fast 断言；②grid.py 换轴 min_reversal_score∈{None,1..7} × BTC/ETH（--spot，固定参数取 b07 最优）；③结果：门控方向正确（score≥1 验证段 BTC 减亏 49%、ETH 扭亏 +0.0166）但合并胜率 27.9% 仅超盈亏线 0.9pp（<1 SE）且存在校准泄漏（评分阈值在全量含验证段上标定）→ **min_reversal_score 维持 None**；④机理结论：评分排序的是路径收益而非结算胜率，score≥2 起单调恶化，2x 止盈出场实验成为最大杠杆。测试 188→192 passed（+4 门控测试：score=5 合成场景精确入场/基线零回归/无 spot fail-closed/门控关闭路径不变） |
